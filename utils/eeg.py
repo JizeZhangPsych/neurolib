@@ -133,7 +133,7 @@ class HeteroStudy:
         return out
 
 class Pathfinder:
-    def __init__(self, def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", mne_fdr_name="after_mne", recon_fdr_name="after_recon", hmm_fdr_name="after_hmm", matlab_out_fdr_name="after_aas", raw_fdr_name="edfs", slice_fdr_name="abnormal_slices", debug_fdr_name="debug", **kwargs):
+    def __init__(self, def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", src_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", mne_fdr_name="after_mne", recon_fdr_name="after_recon", hmm_fdr_name="after_hmm", matlab_out_fdr_name="after_aas", raw_fdr_name="edfs", slice_fdr_name="abnormal_slices", debug_fdr_name="debug", **kwargs):
         """
             Generates a class containing for finding paths of EEG-fMRI processing.
             Parameters:
@@ -149,8 +149,11 @@ class Pathfinder:
             self.fdr["fsl"] = def_fsl_dir
 
         self.fdr["base"] = base_dir
+        self.fdr["src"] = src_dir
+
+        self.fdr["raw"] = os.path.join(self.fdr['src'], raw_fdr_name)
+
         self.fdr["slice"] = os.path.join(self.fdr['base'], slice_fdr_name)
-        self.fdr["raw"] = os.path.join(self.fdr['base'], raw_fdr_name)
         self.fdr["matlab"] = os.path.join(self.fdr['base'], matlab_out_fdr_name)
         self.fdr["mne"] = os.path.join(self.fdr['base'], mne_fdr_name)
         self.fdr["recon"] = os.path.join(self.fdr['base'], recon_fdr_name)
@@ -219,21 +222,26 @@ def parse_subj(subject, digit_only=False):
         }
     return subj_dict
 
-def filename2subj(filename):
-    filename = filename.split('/')[-1]
-    match = re.search(r'sub-(\d+).*ses-(\d+).*run-(\d+).*block-(\d+)', filename)
-    if match:
-        subj = match.group(1).lstrip("0")
-        ses = match.group(2).lstrip("0")
-        run = match.group(3).lstrip("0")
-        block = match.group(4).lstrip("0")
-        subject_identifier = subj + ses + run + block
-        return subject_identifier
-    else:
-        match = re.search(r'(\d+)_preproc-raw.fif', filename)
-        subject = match.group(1)
-        return subject
-    raise ValueError("Filename does not match the expected pattern")
+def filename2subj(filename, ds_name='staresina'):
+    if ds_name == 'staresina':
+    
+        filename = filename.split('/')[-1]
+        match = re.search(r'sub-(\d+).*ses-(\d+).*run-(\d+).*block-(\d+)', filename)
+        if match:
+            subj = match.group(1).lstrip("0")
+            ses = match.group(2).lstrip("0")
+            run = match.group(3).lstrip("0")
+            block = match.group(4).lstrip("0")
+            subject_identifier = subj + ses + run + block
+            return subject_identifier
+        else:
+            match = re.search(r'(\d+)_preproc-raw.fif', filename)
+            subject = match.group(1)
+            return subject
+        raise ValueError("Filename does not match the expected pattern")
+    elif ds_name == 'lemon':
+        filename = filename.split('/')[-1].split('.')[0]
+        return filename
     
 
 def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, res_mult=32, figsize=(20,3), save_pth=None, debug=False):
@@ -285,7 +293,7 @@ def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, re
             ch_types = picks if picks in ALL_CHANNEL_LIST else 'eeg'
             mne_list.append(mne.io.RawArray(eeg_obj, mne.create_info(eeg_obj.shape[0], sfreq=fs, ch_types=ch_types)))
     
-    n_fft = np.power(2, np.round(np.log2(fs*res_mult))).astype(np.int)
+    n_fft = np.power(2, np.round(np.log2(fs*res_mult))).astype(np.int64)
     
     fig, ax = plt.subplots(1,len(mne_list), figsize = figsize)
     if len(mne_list) == 1:
@@ -302,7 +310,7 @@ def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, re
                     n_fft = n_fft // 2
                     print(f'WARNING: PSD calculation failed, trying again with a smaller n_fft {n_fft}')
                 elif 'axes must be an array-like of length' in str(e):
-                    fig_psd = psd.plot(picks=picks, show=False)
+                    fig_psd = psd.plot(show=False)
                     if save_pth is None:
                         save_pth = "./foobar.png"
                     fig_psd.savefig(f"{save_pth}_{name}_{idx}.png")
@@ -519,7 +527,7 @@ def pcs_plot(pcs, target_fdr, ch_list, ch_names, info, win_list=None, figsize=(2
             raise ValueError(f"Number of channels in pcs ({pcs.shape[-3]}) is larger than number of channels in ch_names ({len(ch_names)})")
     
     x = np.arange(pcs.shape[-2]) / fs
-    n_fft = np.power(2, np.round(np.log2(fs))).astype(np.int)   # signal length is around 1s
+    n_fft = np.power(2, np.round(np.log2(fs))).astype(np.int64)   # signal length is around 1s
     psd2db = lambda psd_data: 10*np.log10(np.maximum(psd_data*1e12, np.finfo(float).tiny))
     if len(pcs.shape) == 3:
         for ch_name in ch_list:

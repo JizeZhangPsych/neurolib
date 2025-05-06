@@ -59,14 +59,15 @@ def ckpt_report(dataset, userargs):
         'always_print': ['EKG'],    # must be name, 'eeg' is not allowed
         'std_channel_pick': 'eeg',
         'print_pcs': True,
-        'print_noise': True
+        'print_noise': True,
+        'ds_name': 'staresina'
     }
     userargs = proc_userargs(userargs, default_args)
     
     fs = dataset['raw'].info['sfreq']
     picks = dataset[f"picks_{userargs['key_to_print']}"] if f"picks_{userargs['key_to_print']}" in dataset else 'eeg'
-    subject = filename2subj(dataset['raw'].filenames[0])
-    save_fdr = os.path.join(dataset['pf'].get_fdr_dict()['mne'], "ckpt", subject, userargs['ckpt_name'])
+    subject = filename2subj(dataset['raw'].filenames[0], ds_name=userargs['ds_name'])
+    save_fdr = os.path.join(dataset['pf'].get_fdr_dict()['prep'], "ckpt", subject, userargs['ckpt_name'])
     ensure_dir(save_fdr)
     
     if userargs['key_to_print'] is None:
@@ -103,7 +104,7 @@ def ckpt_report(dataset, userargs):
         print_ch(ch_name)
     
     if userargs['print_pcs']:
-        pc_fdr_name = os.path.join(dataset['pf'].get_fdr_dict()['mne'], "ckpt", subject, f"pc_{userargs['key_to_print']}")
+        pc_fdr_name = os.path.join(dataset['pf'].get_fdr_dict()['prep'], "ckpt", subject, f"pc_{userargs['key_to_print']}")
         ensure_dir(pc_fdr_name)
         
         # channel_idx_to_print = []
@@ -113,7 +114,7 @@ def ckpt_report(dataset, userargs):
         pcs_plot(dataset[f"pc_{userargs['key_to_print']}"], pc_fdr_name, channel_to_print, psd.ch_names, info=psd.info)
     
     if userargs['print_noise']:
-        noise_fdr_name = os.path.join(dataset['pf'].get_fdr_dict()['mne'], "ckpt", subject, f"noise_{userargs['key_to_print']}")
+        noise_fdr_name = os.path.join(dataset['pf'].get_fdr_dict()['prep'], "ckpt", subject, f"noise_{userargs['key_to_print']}")
         ensure_dir(noise_fdr_name)
         for ch_name in channel_to_print:
             psd_plot([dataset[f"noise_{userargs['key_to_print']}"]], [ch_name], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], picks=[ch_name], save_pth=os.path.join(noise_fdr_name, f"{ch_name}_psd.png"))
@@ -276,8 +277,26 @@ def create_epoch(dataset, userargs):
             rand_tp_list = np.sort(np.random.choice(np.arange(np.min(he_tp_list), np.max(he_tp_list)), size=len(he_tp_list), replace=False))
             events = rand_tp_list.reshape(-1, 1)
             events = np.concatenate([events, np.zeros_like(events), np.ones_like(events)], axis=1)
+    elif event == 'simulate':
+        ### WARNING: random in this case represents the percentage of noise in the epoch timepoints, not the random sampling of the events.
+        epoch_diff = tmax*dataset['raw'].info['sfreq']
+        rand_range = int(epoch_diff*random)
+        
+        tp_list = np.arange(dataset['raw'].first_samp, dataset['raw'].last_samp, epoch_diff)
+        if rand_range > 0:
+            tp_list = tp_list + np.random.rand(-rand_range, rand_range, size=len(tp_list))
+        events = tp_list.reshape(-1, 1).astype(np.int64)
+        events = np.concatenate([events, np.zeros_like(events), np.ones_like(events)], axis=1)
+        epoch_name = 'sim_ep'
+        event_id = 1
     else:
         raise ValueError(f"Event {event} not recognized.")
+
+    while True:
+        if epoch_name in dataset:
+            epoch_name = epoch_name + "_"
+        else:
+            break
 
     dataset[epoch_name] = mne.Epochs(dataset['raw'], events=events, tmin=tmin, tmax=tmax, event_id=event_id, baseline=None, proj=False)
     return dataset
@@ -315,14 +334,18 @@ def epoch_sw_pca(dataset, userargs):
     cleaned = np.array(orig_data - noise)
     
     pc_name = f"pc_{epoch_key}"
-    if pc_name in dataset:
-        pc_name = pc_name + "_"
     noise_name = f"noise_{epoch_key}"
-    if noise_name in dataset:
-        noise_name = noise_name + "_"
     picks_name = f"picks_{epoch_key}"
-    if picks_name in dataset:
-        picks_name = picks_name + "_"
+
+    assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
+    # if pc_name in dataset:
+        # pc_name = pc_name + "_"
+    # if noise_name in dataset:
+        # noise_name = noise_name + "_"
+    # if picks_name in dataset:
+        # picks_name = picks_name + "_"
         
     dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
     
@@ -362,14 +385,18 @@ def epoch_pca(dataset, userargs):
     cleaned = np.array((orig_data - noise).reshape(orig_data.shape[2], *orig_data.shape[:2]))
     
     pc_name = f"pc_{epoch_key}"
-    if pc_name in dataset:
-        pc_name = pc_name + "_"
     noise_name = f"noise_{epoch_key}"
-    if noise_name in dataset:
-        noise_name = noise_name + "_"
     picks_name = f"picks_{epoch_key}"
-    if picks_name in dataset:
-        picks_name = picks_name + "_"
+        
+    assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
+    # if pc_name in dataset:
+        # pc_name = pc_name + "_"
+    # if noise_name in dataset:
+        # noise_name = noise_name + "_"
+    # if picks_name in dataset:
+        # picks_name = picks_name + "_"
         
     dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
         

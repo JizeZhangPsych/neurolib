@@ -6,7 +6,7 @@ from mne.filter import filter_data
 from mne.utils import sum_squared
 from mne.preprocessing.ecg import _get_ecg_channel_index, _make_ecg
 
-from ecgdetectors import Detectors
+# from ecgdetectors import Detectors
 
 def qrs_correction(ecg_event, raw, max_heart_rate=160, min_heart_rate=40, new_event_idx=998):
     event_timing = ecg_event[:, 0]
@@ -136,7 +136,7 @@ class QRSDetector:
                 
         self.tstart = tstart
         self.fs = raw.info['sfreq']
-        self.detectors = Detectors(self.fs)
+        # self.detectors = Detectors(self.fs)
         
         # step 1: extract ECG data, refer to mne.preprocessing.ecg
         skip_by_annotation = ('edge', 'bad') if reject_by_annotation else ()

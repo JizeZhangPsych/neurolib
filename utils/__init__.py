@@ -14,5 +14,6 @@ Usage:
 from .util import ensure_dir
 from .eeg import psd_plot, temp_plot, temp_plot_diff, mne_epoch2raw, parse_subj, Pathfinder, filename2subj, HeteroStudy, pick_indices, plot_channel_dists, pcs_plot
 from .qrs import QRSDetector
+from .lemon_prep import lemon_init, LemonPathFinder
 # from .mri import pad_img, unpad_img, read_data, write_data, get_excircle_square
 # from .matlab import MatlabInstance
