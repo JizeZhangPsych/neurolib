@@ -1,0 +1,34 @@
+.vscode/
+.idea/
+__MACOSX/
+.ipynb_checkpoints
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+profile_default/
+ipython_config.py
+
+__pypackages__/
+
+saved/
+saved_*/
+
+*.out
+*.log
+
+test/
+models_trained/
+archive*/
+eeglab2024.2/
+py-ecg-detectors/
+
+*.nii.gz
+*.png
+*.jpg
+*.jpeg
