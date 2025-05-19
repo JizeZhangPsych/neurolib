@@ -133,7 +133,7 @@ class HeteroStudy:
         return out
 
 class Pathfinder:
-    def __init__(self, def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", src_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", mne_fdr_name="after_mne", recon_fdr_name="after_recon", hmm_fdr_name="after_hmm", matlab_out_fdr_name="after_aas", raw_fdr_name="edfs", slice_fdr_name="abnormal_slices", debug_fdr_name="debug", **kwargs):
+    def __init__(self, def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", src="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", prep="after_prep", recon="after_recon", hmm="after_hmm", raw="edfs", slice="abnormal_slices", debug="debug", **kwargs):
         """
             Generates a class containing for finding paths of EEG-fMRI processing.
             Parameters:
@@ -149,16 +149,15 @@ class Pathfinder:
             self.fdr["fsl"] = def_fsl_dir
 
         self.fdr["base"] = base_dir
-        self.fdr["src"] = src_dir
+        self.fdr["src"] = src
 
-        self.fdr["raw"] = os.path.join(self.fdr['src'], raw_fdr_name)
+        self.fdr["raw"] = os.path.join(self.fdr['src'], raw)
 
-        self.fdr["slice"] = os.path.join(self.fdr['base'], slice_fdr_name)
-        self.fdr["matlab"] = os.path.join(self.fdr['base'], matlab_out_fdr_name)
-        self.fdr["mne"] = os.path.join(self.fdr['base'], mne_fdr_name)
-        self.fdr["recon"] = os.path.join(self.fdr['base'], recon_fdr_name)
-        self.fdr["hmm"] = os.path.join(self.fdr['base'], hmm_fdr_name)
-        self.fdr["debug"] = os.path.join(self.fdr['base'], debug_fdr_name)
+        self.fdr["slice"] = os.path.join(self.fdr['base'], slice)
+        self.fdr["prep"] = os.path.join(self.fdr['base'], prep)
+        self.fdr["recon"] = os.path.join(self.fdr['base'], recon)
+        self.fdr["hmm"] = os.path.join(self.fdr['base'], hmm)
+        self.fdr["debug"] = os.path.join(self.fdr['base'], debug)
         
         for key, value in kwargs.items():
             if key in self.fdr.keys():
