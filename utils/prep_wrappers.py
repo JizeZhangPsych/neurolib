@@ -11,16 +11,20 @@ from mne.preprocessing import find_ecg_events
 from osl_ephys.report.preproc_report import plot_channel_dists # usage: plot_channel_dists(raw, savebase)
 from .util import ensure_dir, proc_userargs
 from .eeg import psd_plot, temp_plot, temp_plot_diff, mne_epoch2raw, parse_subj, filename2subj, HeteroStudy as Study, Pathfinder, find_spurious_channels, pcs_plot
-from .qrs import qrs_correction, QRSDetector
-
+from .qrs import kteager_detect, qrs_correction, QRSDetector
+from ecgdetectors import panPeakDetect
+from mne.preprocessing import ICA
 
 def initialize(dataset, userargs):
+    ds_name = userargs.get('ds_name', 'staresina')
+    
     dataset['pf'] = Pathfinder(**userargs)
+    dataset['orig_sfreq'] = dataset['raw'].info['sfreq']
     
     if 'Trigger' in dataset['raw'].ch_names:
         dataset['raw'].drop_channels(['Trigger'])
     
-    subject = filename2subj(dataset['raw'].filenames[0])
+    subject = filename2subj(dataset['raw'].filenames[0], ds_name=ds_name)
     if subject == '2111':   # radiographer error, one more session recorded after 400s
         try:
             dataset['raw'] = dataset['raw'].crop(tmin=0, tmax=400)  
@@ -28,13 +32,18 @@ def initialize(dataset, userargs):
             print("Warning: Subject 2111 has no data after 400s, so no cropping is needed.")
     if subject == '4121':   # Accidental overwriting of resting stage EEG file after computer prompted an overwriting towards the end of the recording. So a very small file is recorded.
         raise Exception("Subject 4121 has its eeg file corrupted: Accidental overwriting of resting stage EEG file after computer prompted an overwriting towards the end of the recording. So a very small file is recorded.")
-    # 3112
+    if subject == '31212':   # incorrect event triggering after 311s
+        try:
+            dataset['raw'] = dataset['raw'].crop(tmin=0, tmax=311)  
+        except ValueError:
+            print("Warning: Subject 31212 has no data after 311s, so no cropping is needed.")
     
     dataset['raw'].drop_channels(['F11', 'F12', 'FT11', 'FT12', 'Cb1', 'Cb2'], on_missing='warn')
     print("Warning: F11, F12, FT11, FT12, Cb1, Cb2 are dropped from the raw data, as no gel is used in these channels.")
     return dataset
 
 def debug_init(dataset, userargs):
+    userargs['ds_name'] = userargs.get('ds_name', 'staresina')
     dataset = initialize(dataset, userargs)
     dataset["real_raw"] = copy.deepcopy(dataset['raw'])
     return dataset
@@ -172,11 +181,15 @@ def crop_TR(dataset, userargs):
     freq = userargs.get('freq', 5000)
     TR = userargs.get('TR', 1.14)
     tmin = userargs.get('tmin', -0.04*1.14)
+    event_name = userargs.get('event_name', None)
+    num_edge_TR = userargs.get('num_edge_TR', 0)
 
+    if event_name is None:
+        event_name = '1200002'
     # def crop_eeg_to_tr(eeg, change_onset=True):   
-    def crop_eeg_to_tr(eeg):   
+    def crop_eeg_to_tr(eeg, num_edge_TR=0):   
         try:
-            trig = mne.events_from_annotations(eeg)[1]['1200002']
+            trig = mne.events_from_annotations(eeg)[1][str(event_name)]
         except KeyError:
             trig = mne.events_from_annotations(eeg)[1]['TR']
         
@@ -187,10 +200,10 @@ def crop_TR(dataset, userargs):
                     start_point = timepoint - eeg.first_samp
                 end_point = timepoint+TR*freq - eeg.first_samp
                 
-        eeg = eeg.crop(tmin=start_point/freq+tmin, tmax=end_point/freq)  
+        eeg = eeg.crop(tmin=start_point/freq+tmin+num_edge_TR*TR, tmax=end_point/freq-num_edge_TR*TR)  
         return eeg
     
-    dataset["raw"] = crop_eeg_to_tr(dataset["raw"])
+    dataset["raw"] = crop_eeg_to_tr(dataset["raw"], num_edge_TR=num_edge_TR)
     return dataset 
 
 def set_channel_type_raw(dataset, userargs):
@@ -213,10 +226,13 @@ def create_epoch(dataset, userargs):
     tmin = userargs.get('tmin', -0.04*1.14)    # remember changing 1.14 to 0.07 if event = slice!
     tmax = userargs.get('tmax', 0.97*1.14)
     random = userargs.get('random', False)
+    event_name = userargs.get('event_name', None)
     
     if event == 'slice':
+        if event_name is None:
+            event_name = '1200002'
         try:
-            event_id = mne.events_from_annotations(dataset['raw'])[1]['1200002']
+            event_id = mne.events_from_annotations(dataset['raw'])[1][str(event_name)]
         except KeyError:
             event_id = mne.events_from_annotations(dataset['raw'])[1]['TR']
 
@@ -246,8 +262,10 @@ def create_epoch(dataset, userargs):
         events = np.concatenate([events, np.zeros_like(events), np.ones_like(events)], axis=1)
         event_id = 1
     elif event == 'TR':
+        if event_name is None:
+            event_name = '1200002'
         try:
-            event_id = mne.events_from_annotations(dataset['raw'])[1]['1200002']
+            event_id = mne.events_from_annotations(dataset['raw'])[1][str(event_name)]
         except KeyError:
             event_id = mne.events_from_annotations(dataset['raw'])[1]['TR']
         events = mne.events_from_annotations(dataset['raw'])[0]
@@ -261,10 +279,15 @@ def create_epoch(dataset, userargs):
             events = np.concatenate([events, np.zeros_like(events), np.ones_like(events)], axis=1)
         
     elif event == 'He132':  # tmin and tmax are not used
-        try:
-            event_id = mne.events_from_annotations(dataset['raw'])[1]['132']
-        except KeyError:
-            event_id = mne.events_from_annotations(dataset['raw'])[1]['128']
+        event_name_list = ['128', '132', '192', '196']
+        if event_name is not None:
+            event_id = mne.events_from_annotations(dataset['raw'])[1][str(event_name)]
+        else:
+            for event_name in event_name_list:
+                if event_name in mne.events_from_annotations(dataset['raw'])[1]:
+                    event_id = mne.events_from_annotations(dataset['raw'])[1][event_name]
+                    break
+            
         events = mne.events_from_annotations(dataset['raw'])[0]
         he_tp_list = events[events[:,-1]==event_id][:,0]
         time_diff = np.diff(he_tp_list)
@@ -323,7 +346,7 @@ def epoch_sw_pca(dataset, userargs):
         all_pcs = U[..., :npc-1]*S[..., None, :npc-1]
         all_pcs = torch.cat([pc0, all_pcs], -1)
     else: 
-        U, S, _ = torch.pca_lowrank(torch.Tensor(spurious_data))
+        U, S, _ = torch.pca_lowrank(spurious_data)
         all_pcs = U[..., :npc]*S[..., None, :npc]   # #win, #ch, len(ep), #pc
     
     padding = torch.repeat_interleave(all_pcs[0:1], window_length-1, dim=0)
@@ -337,15 +360,68 @@ def epoch_sw_pca(dataset, userargs):
     noise_name = f"noise_{epoch_key}"
     picks_name = f"picks_{epoch_key}"
 
-    assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
-    assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
-    assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
-    # if pc_name in dataset:
-        # pc_name = pc_name + "_"
-    # if noise_name in dataset:
-        # noise_name = noise_name + "_"
-    # if picks_name in dataset:
-        # picks_name = picks_name + "_"
+    # assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    # assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    # assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
+    while True:
+        if pc_name in dataset:
+            pc_name = pc_name + "_"
+            continue
+        if noise_name in dataset:
+            noise_name = noise_name + "_"
+            continue
+        if picks_name in dataset:
+            picks_name = picks_name + "_"
+            continue
+        break
+        
+    dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
+    
+    dataset[pc_name] = all_pcs
+    dataset[picks_name] = picks
+    dataset['raw'] = mne_epoch2raw(dataset[epoch_key], dataset['raw'], cleaned, tmin=dataset[epoch_key].tmin, overwrite=overwrite, picks=picks)
+    dataset[noise_name] = dataset[noise_name] - dataset['raw'].get_data()
+    dataset[noise_name] = mne.io.RawArray(dataset[noise_name], dataset['raw'].info, first_samp=dataset['raw'].first_samp)
+
+    return dataset
+
+
+def epoch_aas(dataset, userargs):
+    epoch_key = userargs.get('epoch_key', 'tr_ep')
+    window_length = userargs.get('window_length', 10)
+    picks = userargs.get('picks', 'eeg')
+    overwrite = userargs.get('overwrite', 'new')
+    
+    orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
+    spurious_data = orig_data.unfold(0, window_length, 1)  # #win, #ch, len(ep), len(win)=#ep
+
+    all_pcs = torch.mean(spurious_data, dim=-1).unsqueeze(-1)  # #win, #ch, len(ep), 1
+    
+    padding = torch.repeat_interleave(all_pcs[0:1], window_length-1, dim=0)
+    all_pcs = torch.cat([padding, all_pcs], dim=0)    # 29+#win, #ch, len(ep), #pc
+    
+    # noise = lstsq(all_pcs, orig_data)[0].unsqueeze(-1)   # 29+#win, #ch, #pc, 1
+    # noise = (all_pcs @ noise)[...,0]
+    cleaned = np.array(orig_data - all_pcs.squeeze())
+    
+    pc_name = f"pc_{epoch_key}"
+    noise_name = f"noise_{epoch_key}"
+    picks_name = f"picks_{epoch_key}"
+
+    # assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    # assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    # assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
+    while True:
+        if pc_name in dataset:
+            pc_name = pc_name + "_"
+            continue
+        if noise_name in dataset:
+            noise_name = noise_name + "_"
+            continue
+        if picks_name in dataset:
+            picks_name = picks_name + "_"
+            continue
+        break
         
     dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
     
@@ -367,7 +443,8 @@ def epoch_pca(dataset, userargs):
     remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
     
     orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks)) # #ep, #ch, len(ep)
-    orig_data = orig_data.reshape(*orig_data.shape[1:], orig_data.shape[0])  # #ch, len(ep), #ep
+    # orig_data = orig_data.reshape(*orig_data.shape[1:], orig_data.shape[0])
+    orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
     pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
     spurious_data = orig_data - pca_mean.unsqueeze(1)
     if force_mean_pc0:
@@ -382,7 +459,7 @@ def epoch_pca(dataset, userargs):
         
     noise = lstsq(all_pcs, spurious_data)[0]   # #ch, #pc, #ep
     noise = all_pcs @ noise + pca_mean.unsqueeze(1)  # #ch, len(ep), #ep
-    cleaned = np.array((orig_data - noise).reshape(orig_data.shape[2], *orig_data.shape[:2]))
+    cleaned = np.array((orig_data - noise).permute(2, 0, 1))
     
     pc_name = f"pc_{epoch_key}"
     noise_name = f"noise_{epoch_key}"
@@ -409,13 +486,14 @@ def epoch_pca(dataset, userargs):
 
 
 def qrs_detect(dataset, userargs):
-    delay = userargs.get('delay', 0.21)
-    bcg_name = userargs.get('bcg_name', 'EKG')
+    delay = userargs.get('delay', 0.0)  # if use EKG, delay is better to be 0.21, if use EEG, use 0.0
+    bcg_name = userargs.get('bcg_name', 'mean')
     l_freq = userargs.get('l_freq', 7)
     h_freq = userargs.get('h_freq', 40)
     correct = userargs.get('correct', True)
-    method = userargs.get('method', 'mne')
+    method = userargs.get('method', 'kteo')
     random = userargs.get('random', False)
+    median_mult = userargs.get('median_mult', 0.75)
     
     if method == 'mne':
         ecg = find_ecg_events(dataset['raw'], ch_name=bcg_name, l_freq=l_freq, h_freq=h_freq)
@@ -426,12 +504,20 @@ def qrs_detect(dataset, userargs):
                 raise AssertionError("No R peaks detected. Please check the data.")
         ecg = np.unique(ecg[0], axis=0)
         if correct:
-            ecg = qrs_correction(ecg, dataset['raw'], new_event_idx=999)
+            ecg = qrs_correction(ecg, dataset['raw'], dataset['raw'].get_data(picks='EKG').squeeze(), new_event_idx=999)
+    elif method == 'kteo':
+        fs = dataset['raw'].info['sfreq']
+        kteo = kteager_detect(dataset["raw"], filt_emg=True, filt_kteo=True, picks=bcg_name, l_freq=l_freq, h_freq=h_freq)
+        peaks = np.array(panPeakDetect(kteo, fs))
+        peaks += dataset['raw'].first_samp
+        ecg = np.column_stack([peaks, np.zeros(len(peaks)), 999*np.ones(len(peaks))]).astype(np.int64)
+        if correct:
+            ecg = qrs_correction(ecg, dataset['raw'], kteo, new_event_idx=999, iterations=3, max_heart_rate=150)
     else:
         ecg = QRSDetector(dataset['raw'], ch_name=bcg_name, l_freq=l_freq, h_freq=h_freq).get_events(correction=correct, method=method)
     
     r_list = ecg[:,0]
-    half_ep_size = np.median(np.diff(r_list)) * 0.75 / dataset['raw'].info['sfreq']
+    half_ep_size = np.median(np.diff(r_list)) * median_mult / dataset['raw'].info['sfreq']
  
     dataset['bcg_ep'] = mne.Epochs(dataset['raw'], events=ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
     
@@ -444,7 +530,6 @@ def qrs_detect(dataset, userargs):
         dataset['bcg_ep_rand'] = mne.Epochs(dataset['raw'], events=events, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=1, baseline=None, proj=False)
     return dataset
     
-        
 def bcg_removal(dataset, userargs):
     method = userargs.get('method', 'obs')
     npc = userargs.get('npc', 3)
@@ -458,4 +543,43 @@ def bcg_removal(dataset, userargs):
         dataset = epoch_pca(dataset, userargs={'epoch_key': 'bcg_ep', 'npc': npc, 'force_mean': True, 'overwrite': overwrite, 'filt': filt, 'tmin':dataset['bcg_ep'].tmin, 'remove_mean': remove_mean, 'picks': picks, 'filt_fit_target': filt_fit_target})
     else:
         raise NotImplementedError(f"Method {method} not implemented.")
+    return dataset
+
+def bcg_ep_ica(dataset, userargs):
+    threshold = userargs.get('threshold', 0.05)
+    picks = userargs.get('picks', 'eeg')
+    seed = userargs.get('seed', 42)
+    max_iter = userargs.get('max_iter', 'auto')
+    n_components = userargs.get('n_components', 20)
+    qrs_event_id = userargs.get('qrs_event_id', 999)
+    
+    assert 'bcg_ep' in dataset, "Please run qrs_detect first to create bcg_ep."
+    
+    ev = copy.deepcopy(dataset["bcg_ep"].events)
+    try: 
+        foobar = dataset["bcg_ep"].get_data()
+        del foobar
+        downsample_factor = 1
+    except ValueError:  # the epoch is taken before downsampling. we need to reconstruct the epoch with the correct sampling rate.
+        downsample_factor = dataset['orig_sfreq'] / dataset['raw'].info['sfreq']
+    
+    ev[:,0] = ev[:,0] / downsample_factor
+    ev = ev.astype(np.int64)
+    bcg_ep = mne.Epochs(dataset['raw'], events=ev, tmin=dataset["bcg_ep"].tmin, tmax=dataset["bcg_ep"].tmax, event_id=qrs_event_id, baseline=None, proj=False)
+    bcg_ep.load_data()  # Ensure the data is loaded before applying ICA
+    
+    ica = ICA(n_components=n_components, max_iter=max_iter, random_state=seed)
+    ica.fit(bcg_ep)
+    
+    exclude_list = []
+    for i in range(n_components):
+        var = ica.get_explained_variance_ratio(bcg_ep, components=[i], ch_type=picks)
+        if var['eeg'] > threshold:
+            exclude_list.append(i)
+        else:
+            break
+    
+    ica.exclude = exclude_list
+    dataset['raw_before_ica'] = copy.deepcopy(dataset['raw'])
+    dataset['raw'] = ica.apply(dataset['raw'])
     return dataset

@@ -1,4 +1,7 @@
-import SimpleITK as sitk
+try:
+    import SimpleITK as sitk
+except ImportError:
+    sitk = None
 
 import torch
 import torch.nn.functional as F

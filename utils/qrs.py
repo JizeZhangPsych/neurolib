@@ -5,10 +5,135 @@ from mne.annotations import _annotations_starts_stops
 from mne.filter import filter_data
 from mne.utils import sum_squared
 from mne.preprocessing.ecg import _get_ecg_channel_index, _make_ecg
+import scipy.signal as signal
 
-# from ecgdetectors import Detectors
+from ecgdetectors import Detectors
 
-def qrs_correction(ecg_event, raw, max_heart_rate=160, min_heart_rate=40, new_event_idx=998):
+
+def kteager_detect(raw, slice_period=None, tr_period=None, filt_emg=False, filt_kteo=True, picks='mean', l_freq=7, h_freq=40, filter_length=0.04):
+    """Detect QRS complexes using K. Teager's method."""
+
+    if slice_period is not None:
+        raise NotImplementedError("slice_period is not implemented yet. plans to ignore harmonics of slice/tr period when calculating f_d for value k, to minimize the effect of residual GA to qrs detection")
+    if tr_period is not None:
+        raise NotImplementedError("tr_period is not implemented yet")
+    if picks == 'mean':
+        # Use mean of EEG channels as ECG source
+        ecg_data = raw.get_data(picks='eeg', reject_by_annotation='NaN')
+        ecg_data = np.nan_to_num(ecg_data, nan=0.0).mean(axis=0, keepdims=True)
+    else:
+        ecg_data = raw.get_data(picks=picks, reject_by_annotation='NaN')
+        ecg_data = np.nan_to_num(ecg_data, nan=0.0)
+    fs = round(raw.info['sfreq'])
+    
+    # bandpass 7-40, fmrib code put this after MA filter, unsure why
+    ecg_data = mne.filter.filter_data(ecg_data, sfreq=fs, l_freq=l_freq, h_freq=h_freq, verbose=False)
+    
+    def ma_filter(data, interval):
+        """Apply moving average filter to data."""
+        b = round(interval * fs)
+        b = np.ones(b) / b
+        return signal.filtfilt(b, [1], data)
+
+    if filt_emg:
+        # EMG noise suppression, 0.028 s MA filter
+        ecg_data = ma_filter(ecg_data, 0.02)
+        ecg_data = ma_filter(ecg_data, 0.028)
+        
+    # calculate k value
+    nfft = round(2**np.ceil(np.log2(100*fs)))
+    ecg_seg = ecg_data[:5*fs]
+    ecg_windowed = (ecg_seg-np.mean(ecg_seg)) * signal.windows.hann(len(ecg_seg))
+    freq = np.fft.fft(ecg_windowed, n=nfft)
+    psd = (freq * np.conj(freq)) / nfft
+    psd[:,:int(l_freq*nfft/fs)] = 0  # remove low frequencies
+    psd[:,int(h_freq*nfft/fs):] = 0  # remove high frequencies
+    
+    # np.argsort(psd)[::-1]
+    f_d = np.argmax(psd) * fs / nfft
+    k = round(fs / f_d / 4)
+    
+    ecg_data = ecg_data.squeeze()
+    kteo = ecg_data[k:-k]**2 - ecg_data[:-2*k]*ecg_data[2*k:]
+    kteo[-1] = 0
+    if filt_kteo:
+        # MA filter with 0.04 s
+        kteo = ma_filter(kteo, filter_length)
+    kteo[kteo < 0] = 0  
+    padded_kteo = np.zeros_like(ecg_data)
+    padded_kteo[k:-k] = kteo
+    return padded_kteo
+    
+    # # mfr calculation
+    # ms350 = round(0.35 * fs)
+    # ms300 = round(0.3 * fs)
+    # ms50 = round(0.05 * fs)
+    # ms1200 = round(1.2 * fs)
+    # msWait = round(0.55 * fs)
+
+    # M = np.zeros(len(kteo))
+    # R = np.zeros(len(kteo))
+    # F = np.zeros(len(kteo))
+    # F2 = np.zeros(len(kteo))
+    # MFR = np.zeros(len(kteo))
+    # Mc = 0.45
+    # R5 = np.ones(5) * round(nfft/np.argmax(psd))
+    # M5 = Mc * np.ones(5) * np.max(kteo[fs:fs*6])
+
+    # M[:5*fs] = np.mean(M5)
+    # newM5 = np.mean(M5)
+    # F[:ms350] = np.mean(kteo[fs:fs+ms350])
+    # F2[:ms350] = np.mean(kteo[fs:fs+ms350])
+    
+    # detect_flag = False
+    # timer1 = 0
+    # peaks = []
+    # for n in range(len(kteo)):
+    #     timer1 += 1
+    #     if len(peaks) >= 2:
+    #         if detect_flag:
+    #             detect_flag = False
+    #             M[n] = np.mean(M5)
+    #             Mdec = (M[n] - M[n]*Mc) / (ms1200-msWait)
+    #             Rdec = Mdec/1.4
+    #         elif timer1 <= msWait or timer1 > ms1200:
+    #             M[n] = M[n-1]
+    #         elif timer1 == msWait + 1:
+    #             M[n] = M[n-1] - Mdec
+    #             newM5 = Mc * np.max(kteo[n-msWait:n])
+    #             newM5 = min(newM5, 1.5 * M5[4])
+    #             M5 = np.roll(M5, -1)
+    #             M5[-1] = newM5
+    #         elif timer1 > msWait+1 and timer1 <= ms1200:
+    #             M[n] = M[n-1] - Mdec
+    #     if n > ms350:
+    #         F[n] = F[n-1] + (np.max(kteo[n+1-ms50:n+1]) - np.max(kteo[n+1-ms350:n+1-ms300])) / 150
+    #         F2[n] = F[n] - np.mean(kteo[fs:fs+ms350+1]) + newM5
+        
+    #     Rm = np.mean(R5)
+    #     if timer1 <= round(2*Rm/3):
+    #         R[n] = 0
+    #     elif len(peaks)>=2:
+    #         R[n] = R[n-1] - Rdec
+        
+    #     MFR[n] = M[n] + F2[n] + R[n]
+        
+    #     if kteo[n] >= MFR[n] and (timer1 > msWait or len(peaks)==0):
+    #         peaks.append(n)
+    #         if len(peaks) > 1:
+    #             R5 = np.roll(R5, -1)
+    #             R5[-1] = peaks[-1] - peaks[-2]
+    #         detect_flag = True
+    #         timer1 = -1
+    
+    # if debug:
+    #     return peaks, kteo
+    # return peaks
+
+
+
+def qrs_correction(ecg_event, raw, operator, max_heart_rate=160, min_heart_rate=40, new_event_idx=998, iterations=1, corr_thres=0.5):
+    iterations -= 1
     event_timing = ecg_event[:, 0]
     event_length = np.diff(event_timing)
     
@@ -63,14 +188,20 @@ def qrs_correction(ecg_event, raw, max_heart_rate=160, min_heart_rate=40, new_ev
     
     search_range = round(med / 3)
     half_win_range = round(med / 2)
-    ecg_data =raw.get_data(picks='ecg')
+    # ecg_data =raw.get_data(picks='ecg')
     safe_windows = []
     for ev in safe_event:
         start = ev - half_win_range - raw.first_samp
         end = ev + half_win_range + 1 - raw.first_samp
         if start >= 0 and end <= raw._data.shape[1]:
-            safe_windows.append(ecg_data[0, start:end])
+            safe_windows.append(operator[start:end])
     
+    if len(safe_windows) < 5:
+        for ev in ecg_event[:,0]:
+            start = ev - half_win_range - raw.first_samp
+            end = ev + half_win_range + 1 - raw.first_samp
+            if start >= 0 and end <= raw._data.shape[1]:
+                safe_windows.append(operator[start:end])
     tmplt = np.mean(np.array(safe_windows), axis=0).squeeze()
     
     # step 4: move each event a little bit to maximize the pearson correlation with the template
@@ -81,13 +212,10 @@ def qrs_correction(ecg_event, raw, max_heart_rate=160, min_heart_rate=40, new_ev
         returns: shape (N,) — correlation of each window with the template
         """
         # Normalize template
-        template_norm = template - template.mean()
-        windows_norm = windows - windows.mean(axis=1, keepdims=True)
+        return np.array([np.abs(np.corrcoef(window, template)[0,1]) for window in windows])
 
-        return np.sum(windows_norm * template_norm, axis=1) / (windows.std(axis=1)*template.std())
-
-    def align_with_template(event_time_list):  
-        event_time_list = event_time_list.astype(np.int64)
+    def align_with_template(event_time_list, corr_thres=0.5):  
+        event_time_list = np.array(event_time_list, dtype=np.int64)
         new_event_list = []
         for ev in event_time_list:
             ev_pos = ev - raw.first_samp
@@ -95,23 +223,28 @@ def qrs_correction(ecg_event, raw, max_heart_rate=160, min_heart_rate=40, new_ev
                 continue
             
             win_pos_list = np.arange(ev_pos-search_range, ev_pos+search_range+1)
-            window_arr = np.stack([ecg_data[0, pos-half_win_range:pos+half_win_range+1] for pos in win_pos_list])
+            window_arr = np.stack([operator[pos-half_win_range:pos+half_win_range+1] for pos in win_pos_list])
             corr = pearson_corr(window_arr, tmplt)
+            
+            if np.max(corr) < corr_thres:
+                continue
+            
             best_pos = win_pos_list[np.argmax(corr)]
             new_event_list.append([best_pos+raw.first_samp, 0, new_event_idx])
+            
         return np.unique(np.array(new_event_list), axis=0)
-    new_event = align_with_template(event_timing)
+    new_event = align_with_template(event_timing, corr_thres=corr_thres)
     
     # step 5: fn removal: add events between two far away events
     # also at start & end of the signal
-    # also align them
+    # also align them if iterations > 1
     event_length = np.diff(new_event[:, 0])
     med = np.median(event_length[(event_length<max_length)])
     thres = min(max_length, 1.5*med)
     fn_pos_list = np.where(event_length>thres)[0]
     fn_list = []
     for fn_pos in fn_pos_list:
-        hb_in_between = np.round(event_length[fn_pos] / med)  # number of hearbeats in between, hb_in_between = number of missing events + 1
+        hb_in_between = round(event_length[fn_pos] / med)  # number of hearbeats in between, hb_in_between = number of missing events + 1
         fn_length = round(event_length[fn_pos]/hb_in_between)
         fn = (np.arange(1, hb_in_between) * fn_length + new_event[fn_pos][0]).astype(np.int64)
         fn_list.append(fn)
@@ -123,10 +256,17 @@ def qrs_correction(ecg_event, raw, max_heart_rate=160, min_heart_rate=40, new_ev
         missing_events = np.floor((raw._data.shape[1] - new_event[-1, 0]) / med)
         fn = new_event[-1, 0] + (np.arange(missing_events)+1) * med
         fn_list.append(fn)
-    fn_list = np.concatenate(fn_list) if len(fn_list) > 0 else np.array([])
-    new_event = np.concatenate([new_event, align_with_template(fn_list)])
+    
+    if len(fn_list) > 0:
+        fn_list = np.concatenate(fn_list)
+        if iterations > 1:  # if last iteration, don't align fn_list with template
+            fn_list = align_with_template(fn_list, corr_thres=corr_thres)
+        if len(fn_list.shape) > 1:
+            new_event = np.concatenate([new_event, fn_list])
+
+    new_event = np.unique(new_event,axis=0)
     new_event = new_event[np.argsort(new_event[:, 0])]
-    return new_event
+    return new_event if iterations <= 0 else qrs_correction(new_event, raw, operator, max_heart_rate, min_heart_rate, new_event_idx, iterations=iterations-1, corr_thres=corr_thres)
 
 class QRSDetector:
     def __init__(self, raw, ch_name=None, tstart=0.0,

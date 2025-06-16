@@ -2,12 +2,9 @@ import os, glob, re, parse, copy
 from natsort import natsorted as sorted
 import numpy as np
 import mne
-from matplotlib import pyplot as plt
-from pathlib import Path
 from string import Formatter
-from osl_ephys.utils import Study
+from matplotlib import pyplot as plt
 from scipy.signal import find_peaks, welch
-from osl_ephys.report.preproc_report import plot_channel_dists # usage: plot_channel_dists(raw, savebase)
 
 
 ALL_CHANNEL_LIST = {'grad', 'mag', 'eeg', 'csd', 'stim', 'eog', 'emg', 'ecg', 'ref_meg', 'resp', 'exci', 'ias', 'syst', 'misc', 'seeg', 'dbs', 'bio', 'chpi', 'dipole', 'gof', 'ecog', 'hbo', 'hbr', 'temperature', 'gsr', 'eyetrack'}
@@ -70,67 +67,6 @@ def find_spurious_channels(psd, freq_range=[1,40], slice_interval=0.07, residual
                 break
 
     return dirty_channels
-
-class DebugStudy(Study):
-    """ If Study find inconsistent file, print the warning out
-    """
-    def __init__(self, studydir):
-        self.studydir = studydir
-        self.fieldnames = [fname for _, fname, _, _ in Formatter().parse(self.studydir) if fname]
-        self.globdir = re.sub("\{.*?\}","*", studydir)
-        self.match_files = sorted(glob.glob(self.globdir))
-        print('found {} files'.format(len(self.match_files)))
-        tmp_lst = []
-        for ff in self.match_files:
-            if parse.parse(self.studydir, ff) is None:
-                print('Warning: {} does not match the studydir'.format(ff)) # the only changed part: adding a warning
-            tmp_lst.append(ff)
-        self.match_files = tmp_lst
-        print('keeping {} consistent files'.format(len(self.match_files)))
-        self.match_values = []
-        for fname in self.match_files:
-            self.match_values.append(parse.parse(self.studydir, fname).named)
-        self.fields = {}
-        for key, value in self.match_values[0].items():
-            self.fields[key] = [value]
-            for d in self.match_values[1:]:
-                self.fields[key].append(d[key])
-
-class HeteroStudy:
-    """Improved version of osl_ephys.utils.Study that supports heterogeneous file structures.
-    """
-    def __init__(self, studydir_list):
-        """Initialize the HeteroStudy object.
-        Parameters:
-        studydir_list (list or str): List of study directories. If str, it will be converted to a list.
-        """
-        
-        if isinstance(studydir_list, str):
-            studydir_list = [studydir_list]
-        
-        self.studydir_list = studydir_list
-        self.study_list = [DebugStudy(studydir) for studydir in studydir_list]
-        self.fields = {}
-        for study in self.study_list:
-            self.fields.update(study.fields)
-    
-    def refresh(self):
-        """Refresh the study list.
-        """
-        self.study_list = [DebugStudy(studydir) for studydir in self.studydir_list]
-    
-    def get(self, check_exist=True, **kwargs):
-        """Get files from the study list that match the fieldnames.
-        Parameters:
-        check_exist (bool): Whether to check if the files exist.
-        **kwargs (dict): The field names and values to match.
-        Returns:
-        out (list): The files that match the field names and values.
-        """
-        out = []
-        for study in self.study_list:
-            out += study.get(check_exist=check_exist, **kwargs)
-        return out
 
 class Pathfinder:
     def __init__(self, def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", src="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", prep="after_prep", recon="after_recon", hmm="after_hmm", raw="edfs", slice="abnormal_slices", debug="debug", **kwargs):
@@ -237,10 +173,11 @@ def filename2subj(filename, ds_name='staresina'):
             match = re.search(r'(\d+)_preproc-raw.fif', filename)
             subject = match.group(1)
             return subject
-        raise ValueError("Filename does not match the expected pattern")
     elif ds_name == 'lemon':
         filename = filename.split('/')[-1].split('.')[0]
         return filename
+    elif ds_name == 'irene':
+        return filename.split('/')[-1].split('.')[0]
     
 
 def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, res_mult=32, figsize=(20,3), save_pth=None, debug=False):
@@ -333,12 +270,13 @@ def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, re
     return psd
         
 
-def temp_plot(eeg, channel, start=0, length=None, fs=None, events=None, event_id=None, event_onset=0, name='Before BCG removal', save_pth=None, figsize=(20,3)):
+def temp_plot(eeg, channel, start=0, length=None, fs=None, events=None, event_id=None, event_onset=0, name='Before BCG removal', save_pth=None, figsize=(20,3), ylim=None):
     if 'mne.io' in str(type(eeg)):
         if fs is None:
             fs = eeg.info['sfreq']
         data = eeg.get_data(reject_by_annotation='NaN')
-        first_samp = eeg.first_samp
+        # first_samp = eeg.first_samp
+        first_samp = 0
         if isinstance(channel, str):
             channel = eeg.ch_names.index(channel)
     else:
@@ -368,6 +306,8 @@ def temp_plot(eeg, channel, start=0, length=None, fs=None, events=None, event_id
     plt.ylabel('Amplitude (V)')
     plt.title(f'{name}')
     plt.legend()
+    if ylim is not None:
+        plt.ylim(ylim)
     
     if save_pth is not None:
         plt.savefig(save_pth)
@@ -576,3 +516,213 @@ def pcs_plot(pcs, target_fdr, ch_list, ch_names, info, win_list=None, figsize=(2
                 plt.close(fig)
     else:
         raise ValueError("pcs should be of shape (#ch, len(ep), #pc) or (len(win)-1+#windows, #ch, len(ep), #pc)")
+    
+    
+class Study:
+    """Class for simple file finding and looping.
+    
+    Parameters
+    ----------
+    studydir : str
+        The study directory with wildcards.
+    
+    Attributes
+    ----------
+    studydir : str
+        The study directory with wildcards.
+    fieldnames : list
+        The wildcards in the study directory, i.e., the field names in between {braces}.
+    globdir : str
+        The study directory with wildcards replaced with *.
+    match_files : list
+        The files that match the globdir.
+    match_values : list
+        The values of the field names (i.e., wildcards) for each file.
+    fields : dict
+        The field names and values for each file.
+    
+    Notes
+    -----
+    This class is a simple wrapper around glob and parse. It works something like this:
+    
+    >>> studydir = '/path/to/study/{subject}/{session}/{subject}_{task}.fif'
+    >>> study = Study(studydir)
+    
+    Get all files in the study directory:
+    
+    >>> study.get()
+    
+    Get all files for a particular subject:
+    
+    >>> study.get(subject='sub-01')
+    
+    Get all files for a particular subject and session:
+    
+    >>> study.get(subject='sub-01', session='ses-01')
+    
+    The fieldnames that are not specified in ``get`` are replaced with wildcards (``*``).
+    """
+    
+    def __init__(self, studydir):
+        """
+        Notes
+        -----
+        This class is a simple wrapper around glob and parse. It works something like this:
+        
+        >>> studydir = '/path/to/study/{subject}/{session}/{subject}_{task}.fif'
+        >>> study = Study(studydir)
+        
+        Get all files in the study directory:
+        
+        >>> study.get()
+        
+        Get all files for a particular subject:
+        
+        >>> study.get(subject='sub-01')
+        
+        Get all files for a particular subject and session:
+        
+        >>> study.get(subject='sub-01', session='ses-01')
+        
+        The fieldnames that are not specified in ``get`` are replaced with wildcards (*).
+        """
+        self.studydir = studydir
+
+        # Extract field names in between {braces}
+        self.fieldnames = [fname for _, fname, _, _ in Formatter().parse(self.studydir) if fname]
+
+        # Replace braces with wildcards
+        self.globdir = re.sub("\{.*?\}","*", studydir)
+
+        self.match_files = sorted(glob.glob(self.globdir))
+        print('found {} files'.format(len(self.match_files)))
+
+        self.match_files = [ff for ff in self.match_files if parse.parse(self.studydir, ff) is not None]
+        print('keeping {} consistent files'.format(len(self.match_files)))
+
+        self.match_values = []
+        for fname in self.match_files:
+            self.match_values.append(parse.parse(self.studydir, fname).named)
+
+        self.fields = {}
+        # Use first file as a reference for keywords
+        for key, value in self.match_values[0].items():
+            self.fields[key] = [value]
+            for d in self.match_values[1:]:
+                self.fields[key].append(d[key])
+
+    
+    def refresh(self):
+        """Refresh the study directory."""
+        return self.__init__(self.studydir)
+    
+    
+    def get(self, check_exist=True, **kwargs):
+        """Get files from the study directory that match the fieldnames.
+
+        Parameters
+        ----------
+        check_exist : bool
+            Whether to check if the files exist.
+        **kwargs : dict
+            The field names and values to match.
+
+        Returns
+        -------
+        out : list
+            The files that match the field names and values.
+
+        Notes
+        -----
+        Example using ``Study`` and ``Study.get()``:
+        
+        >>> studydir = '/path/to/study/{subject}/{session}/{subject}_{task}.fif'
+        >>> study = Study(studydir)
+        
+        Get all files in the study directory:
+        
+        >>> study.get()
+        
+        Get all files for a particular subject:
+        
+        >>> study.get(subject='sub-01')
+        
+        Get all files for a particular subject and session:
+        
+        >>> study.get(subject='sub-01', session='ses-01')
+        
+        The fieldnames that are not specified in ``get`` are replaced with wildcards (``*``).               
+        """
+        keywords = {}
+        for key in self.fieldnames:
+            keywords[key] = kwargs.get(key, '*')
+
+        fname = self.studydir.format(**keywords)
+        
+        # we only want the valid files
+        if check_exist:
+            return [ff for ff in glob.glob(fname) if any(ff in ff_valid for ff_valid in self.match_files)]
+        else:
+            return glob.glob(fname)
+
+
+class DebugStudy(Study):
+    """ If Study find inconsistent file, print the warning out
+    """
+    def __init__(self, studydir):
+        self.studydir = studydir
+        self.fieldnames = [fname for _, fname, _, _ in Formatter().parse(self.studydir) if fname]
+        self.globdir = re.sub("\{.*?\}","*", studydir)
+        self.match_files = sorted(glob.glob(self.globdir))
+        print('found {} files'.format(len(self.match_files)))
+        tmp_lst = []
+        for ff in self.match_files:
+            if parse.parse(self.studydir, ff) is None:
+                print('Warning: {} does not match the studydir'.format(ff)) # the only changed part: adding a warning
+            tmp_lst.append(ff)
+        self.match_files = tmp_lst
+        print('keeping {} consistent files'.format(len(self.match_files)))
+        self.match_values = []
+        for fname in self.match_files:
+            self.match_values.append(parse.parse(self.studydir, fname).named)
+        self.fields = {}
+        for key, value in self.match_values[0].items():
+            self.fields[key] = [value]
+            for d in self.match_values[1:]:
+                self.fields[key].append(d[key])
+
+class HeteroStudy:
+    """Improved version of osl_ephys.utils.Study that supports heterogeneous file structures.
+    """
+    def __init__(self, studydir_list):
+        """Initialize the HeteroStudy object.
+        Parameters:
+        studydir_list (list or str): List of study directories. If str, it will be converted to a list.
+        """
+        
+        if isinstance(studydir_list, str):
+            studydir_list = [studydir_list]
+        
+        self.studydir_list = studydir_list
+        self.study_list = [DebugStudy(studydir) for studydir in studydir_list]
+        self.fields = {}
+        for study in self.study_list:
+            self.fields.update(study.fields)
+    
+    def refresh(self):
+        """Refresh the study list.
+        """
+        self.study_list = [DebugStudy(studydir) for studydir in self.studydir_list]
+    
+    def get(self, check_exist=True, **kwargs):
+        """Get files from the study list that match the fieldnames.
+        Parameters:
+        check_exist (bool): Whether to check if the files exist.
+        **kwargs (dict): The field names and values to match.
+        Returns:
+        out (list): The files that match the field names and values.
+        """
+        out = []
+        for study in self.study_list:
+            out += study.get(check_exist=check_exist, **kwargs)
+        return out
