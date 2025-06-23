@@ -335,13 +335,18 @@ def temp_plot_diff(eeg, eeg2, channel, start=0, length=None, fs=None, events=Non
         first_samp = 0
     if 'mne.io' in str(type(eeg2)):
         data2 = eeg2.get_data(reject_by_annotation='NaN')
-        assert eeg2.first_samp == first_samp, "eeg and eeg2 should have the same first_samp"
+        # assert eeg2.first_samp == first_samp, "eeg and eeg2 should have the same first_samp"
+        if eeg2.first_samp > first_samp:
+            data = data[:, eeg2.first_samp-first_samp:]
+        if eeg2.first_samp < first_samp:
+            data2 = data2[:, first_samp-eeg2.first_samp:]
+            
         if isinstance(channel, str):
             channel2 = eeg2.ch_names.index(channel)
     else:
         data2 = eeg2.copy()
     if length is None:
-        length = data.shape[1]
+        length = min(data.shape[1], data2.shape[1])
         
     start = int(start)
     length = int(length)
@@ -349,7 +354,8 @@ def temp_plot_diff(eeg, eeg2, channel, start=0, length=None, fs=None, events=Non
         plt.plot(np.arange(start, start + length)/fs, data[channel1][start:start+length], label="Before")
         plt.plot(np.arange(start, start + length)/fs, data2[channel2][start:start+length], label="After", color="orange")
     else:
-        plt.plot(np.arange(start, start + length)/fs, (data2[channel2]-data[channel1])[start:start+length], label="Difference")
+        data_total_length = min(data.shape[1], data2.shape[1]) 
+        plt.plot(np.arange(start, start + length)/fs, (data2[channel2, :data_total_length]-data[channel1, :data_total_length])[start:start+length], label="Difference")
         
 
     plt.xlabel('time (s)')

@@ -37,6 +37,10 @@ def initialize(dataset, userargs):
             dataset['raw'] = dataset['raw'].crop(tmin=0, tmax=311)  
         except ValueError:
             print("Warning: Subject 31212 has no data after 311s, so no cropping is needed.")
+    if subject == '27212':   # forgot one TR event trigger at onset=18.4582s
+        dataset['raw'].annotations.append(18.4582, 0, '1200002')
+    if subject == '17121':   # forgot one TR event trigger at onset=59.8632s
+        dataset['raw'].annotations.append(59.8632, 0, '1200002')
     
     dataset['raw'].drop_channels(['F11', 'F12', 'FT11', 'FT12', 'Cb1', 'Cb2'], on_missing='warn')
     print("Warning: F11, F12, FT11, FT12, Cb1, Cb2 are dropped from the raw data, as no gel is used in these channels.")
@@ -178,12 +182,13 @@ def crop_TR(dataset, userargs):
     """
     
     # event_reference = userargs.get('event_reference', False)
-    freq = userargs.get('freq', 5000)
+    # freq = userargs.get('freq', 5000)
     TR = userargs.get('TR', 1.14)
     tmin = userargs.get('tmin', -0.04*1.14)
     event_name = userargs.get('event_name', None)
     num_edge_TR = userargs.get('num_edge_TR', 0)
 
+    freq = dataset['raw'].info['sfreq']
     if event_name is None:
         event_name = '1200002'
     # def crop_eeg_to_tr(eeg, change_onset=True):   
@@ -227,6 +232,7 @@ def create_epoch(dataset, userargs):
     tmax = userargs.get('tmax', 0.97*1.14)
     random = userargs.get('random', False)
     event_name = userargs.get('event_name', None)
+    epoch_name_diy = userargs.get('epoch_name', None)   # if None, will be set to event + '_ep' or event + '_ep_rand' if random is True
     
     if event == 'slice':
         if event_name is None:
@@ -315,12 +321,14 @@ def create_epoch(dataset, userargs):
     else:
         raise ValueError(f"Event {event} not recognized.")
 
-    while True:
-        if epoch_name in dataset:
-            epoch_name = epoch_name + "_"
-        else:
-            break
+    # while True:
+    #     if epoch_name in dataset:
+    #         epoch_name = epoch_name + "_"
+    #     else:
+    #         break
 
+    if epoch_name_diy is not None:
+        epoch_name = epoch_name_diy
     dataset[epoch_name] = mne.Epochs(dataset['raw'], events=events, tmin=tmin, tmax=tmax, event_id=event_id, baseline=None, proj=False)
     return dataset
 
@@ -333,9 +341,13 @@ def epoch_sw_pca(dataset, userargs):
     overwrite = userargs.get('overwrite', 'new')
     do_align = userargs.get('do_align', False)
     remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
+    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_safe" is used for PC calculation
+    if spurious_event:
+        raise NotImplementedError("Spurious event is not implemented yet.")
     
     assert not do_align, "Alignment not implemented yet."
-    orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
+    safe_key = epoch_key + "_safe" if spurious_event else epoch_key
+    orig_data = torch.tensor(dataset[safe_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
     pca_mean = torch.mean(orig_data, dim=2) * int(remove_mean)    # 29+#win, #ch
     det_orig_data = orig_data - pca_mean.unsqueeze(2)
     spurious_data = det_orig_data.unfold(0, window_length, 1)  # #win, #ch, len(ep), len(win)=#ep
@@ -352,10 +364,13 @@ def epoch_sw_pca(dataset, userargs):
     padding = torch.repeat_interleave(all_pcs[0:1], window_length-1, dim=0)
     all_pcs = torch.cat([padding, all_pcs], dim=0)    # 29+#win, #ch, len(ep), #pc
     
+    if spurious_event:
+        pass
+    
     noise = lstsq(all_pcs, det_orig_data)[0].unsqueeze(-1)   # 29+#win, #ch, #pc, 1
     noise = (all_pcs @ noise)[...,0] + pca_mean.unsqueeze(-1)  # 29+#win, #ch, len(ep)  # [...,0] means squeezing the last dim, not squeeze() for the case #ch=1
     cleaned = np.array(orig_data - noise)
-    
+        
     pc_name = f"pc_{epoch_key}"
     noise_name = f"noise_{epoch_key}"
     picks_name = f"picks_{epoch_key}"
@@ -434,6 +449,18 @@ def epoch_aas(dataset, userargs):
     return dataset
     
 
+# def channel_pca(dataset, userargs):
+#     npc = userargs.get('npc', 3)
+#     picks = userargs.get('picks', 'eeg')
+    
+#     data = torch.tensor(dataset['raw'].get_data(picks=picks))  # #ch, #timepoints
+#     pca_mean = torch.mean(data, dim=0)  # #timepoints
+#     detrended = data - pca_mean.unsqueeze(0)  # #ch, #timepoints
+#     U, S, _ = torch.pca_lowrank(detrended.T)   # [#timepoints, q]; [q,]
+#     all_pcs = U[:, :npc]*S[None, :npc]
+    
+    
+
 def epoch_pca(dataset, userargs):
     epoch_key = userargs.get('epoch_key', 'tr_ep')
     npc = userargs.get('npc', 3)
@@ -441,23 +468,31 @@ def epoch_pca(dataset, userargs):
     picks = userargs.get('picks', 'eeg')
     overwrite = userargs.get('overwrite', 'obs')
     remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
+    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_safe" is used for PC calculation
     
-    orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks)) # #ep, #ch, len(ep)
+    safe_key = epoch_key + "_safe" if spurious_event else epoch_key
+    orig_data = torch.tensor(dataset[safe_key].get_data(picks=picks)) # #ep, #ch, len(ep)
     # orig_data = orig_data.reshape(*orig_data.shape[1:], orig_data.shape[0])
     orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
     pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
-    spurious_data = orig_data - pca_mean.unsqueeze(1)
+    dirty_data = orig_data - pca_mean.unsqueeze(1)
     if force_mean_pc0:
-        pc0 = torch.mean(spurious_data, dim=2).unsqueeze(-1)  # #ch, len(ep), 1
-        detrended = spurious_data - pc0
+        pc0 = torch.mean(dirty_data, dim=2).unsqueeze(-1)  # #ch, len(ep), 1
+        detrended = dirty_data - pc0
         U, S, _ = torch.pca_lowrank(detrended)   # #ch, len(ep), q;    # #ch, q
         all_pcs = U[..., :npc-1]*S[..., None, :npc-1]
         all_pcs = torch.cat([pc0, all_pcs], -1) # #ch, len(ep), #pc
     else:   
-        U, S, _ = torch.pca_lowrank(spurious_data)   # #ch, len(ep), q;    # #ch, q
+        U, S, _ = torch.pca_lowrank(dirty_data)   # #ch, len(ep), q;    # #ch, q
         all_pcs = U[..., :npc]*S[..., None, :npc]
         
-    noise = lstsq(all_pcs, spurious_data)[0]   # #ch, #pc, #ep
+    if spurious_event:
+        del orig_data, dirty_data, U, S  # free memory
+        orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # #ep, #ch, len(ep)
+        orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
+        pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
+        dirty_data = orig_data - pca_mean.unsqueeze(1)  # #ch, len(ep), #ep
+    noise = lstsq(all_pcs, dirty_data)[0]   # #ch, #pc, #ep
     noise = all_pcs @ noise + pca_mean.unsqueeze(1)  # #ch, len(ep), #ep
     cleaned = np.array((orig_data - noise).permute(2, 0, 1))
     
@@ -487,9 +522,9 @@ def epoch_pca(dataset, userargs):
 
 def qrs_detect(dataset, userargs):
     delay = userargs.get('delay', 0.0)  # if use EKG, delay is better to be 0.21, if use EEG, use 0.0
-    bcg_name = userargs.get('bcg_name', 'mean')
-    l_freq = userargs.get('l_freq', 7)
-    h_freq = userargs.get('h_freq', 40)
+    bcg_name = userargs.get('bcg_name', 'pca')
+    l_freq = userargs.get('l_freq', 5)
+    h_freq = userargs.get('h_freq', 15)
     correct = userargs.get('correct', True)
     method = userargs.get('method', 'kteo')
     random = userargs.get('random', False)
@@ -504,22 +539,25 @@ def qrs_detect(dataset, userargs):
                 raise AssertionError("No R peaks detected. Please check the data.")
         ecg = np.unique(ecg[0], axis=0)
         if correct:
-            ecg = qrs_correction(ecg, dataset['raw'], dataset['raw'].get_data(picks='EKG').squeeze(), new_event_idx=999)
+            raise NotImplementedError("Correction for MNE method is not implemented yet.")
+            ecg, spurious_ecg = qrs_correction(ecg, dataset['raw'], dataset['raw'].get_data(picks='EKG').squeeze(), new_event_idx=999)
     elif method == 'kteo':
         fs = dataset['raw'].info['sfreq']
-        kteo = kteager_detect(dataset["raw"], filt_emg=True, filt_kteo=True, picks=bcg_name, l_freq=l_freq, h_freq=h_freq)
+        kteo, ecg_data = kteager_detect(dataset["raw"], filt_emg=False, filt_kteo=True, picks=bcg_name, l_freq=l_freq, h_freq=h_freq)
         peaks = np.array(panPeakDetect(kteo, fs))
         peaks += dataset['raw'].first_samp
         ecg = np.column_stack([peaks, np.zeros(len(peaks)), 999*np.ones(len(peaks))]).astype(np.int64)
         if correct:
-            ecg = qrs_correction(ecg, dataset['raw'], kteo, new_event_idx=999, iterations=3, max_heart_rate=150)
+            ecg, spurious_ecg = qrs_correction(ecg, dataset['raw'], ecg_data, new_event_idx=999)
     else:
         ecg = QRSDetector(dataset['raw'], ch_name=bcg_name, l_freq=l_freq, h_freq=h_freq).get_events(correction=correct, method=method)
+        raise NotImplementedError(f"Method {method} not implemented for QRS detection.")
     
-    r_list = ecg[:,0]
+    r_list = spurious_ecg[:,0]
     half_ep_size = np.median(np.diff(r_list)) * median_mult / dataset['raw'].info['sfreq']
  
-    dataset['bcg_ep'] = mne.Epochs(dataset['raw'], events=ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
+    dataset['bcg_ep_safe'] = mne.Epochs(dataset['raw'], events=ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
+    dataset['bcg_ep'] = mne.Epochs(dataset['raw'], events=spurious_ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
     
     if random:
         # randomly sample same number of epochs, with the same length of bcg_ep
@@ -552,18 +590,13 @@ def bcg_ep_ica(dataset, userargs):
     max_iter = userargs.get('max_iter', 'auto')
     n_components = userargs.get('n_components', 20)
     qrs_event_id = userargs.get('qrs_event_id', 999)
+    downsample = userargs.get('downsample', 1)    # only set this if the "bcg_ep" is not downsampled!!!
     
     assert 'bcg_ep' in dataset, "Please run qrs_detect first to create bcg_ep."
     
     ev = copy.deepcopy(dataset["bcg_ep"].events)
-    try: 
-        foobar = dataset["bcg_ep"].get_data()
-        del foobar
-        downsample_factor = 1
-    except ValueError:  # the epoch is taken before downsampling. we need to reconstruct the epoch with the correct sampling rate.
-        downsample_factor = dataset['orig_sfreq'] / dataset['raw'].info['sfreq']
     
-    ev[:,0] = ev[:,0] / downsample_factor
+    ev[:,0] = ev[:,0] / downsample
     ev = ev.astype(np.int64)
     bcg_ep = mne.Epochs(dataset['raw'], events=ev, tmin=dataset["bcg_ep"].tmin, tmax=dataset["bcg_ep"].tmax, event_id=qrs_event_id, baseline=None, proj=False)
     bcg_ep.load_data()  # Ensure the data is loaded before applying ICA
