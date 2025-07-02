@@ -10,10 +10,12 @@ import mne
 from mne.preprocessing import find_ecg_events
 from osl_ephys.report.preproc_report import plot_channel_dists # usage: plot_channel_dists(raw, savebase)
 from .util import ensure_dir, proc_userargs
-from .eeg import psd_plot, temp_plot, temp_plot_diff, mne_epoch2raw, parse_subj, filename2subj, HeteroStudy as Study, Pathfinder, find_spurious_channels, pcs_plot
+from .eeg import psd_plot, temp_plot, temp_plot_diff, mne_epoch2raw, parse_subj, filename2subj, HeteroStudy as Study, Pathfinder, find_spurious_channels, pcs_plot, pick_indices
 from .qrs import kteager_detect, qrs_correction, QRSDetector
 from ecgdetectors import panPeakDetect
 from mne.preprocessing import ICA
+
+spurious_subject_list = ['13121', '8111', '8112', '8121', '17111', '17112', '31111', '31112', '31121']
 
 def initialize(dataset, userargs):
     ds_name = userargs.get('ds_name', 'staresina')
@@ -73,7 +75,9 @@ def ckpt_report(dataset, userargs):
         'std_channel_pick': 'eeg',
         'print_pcs': True,
         'print_noise': True,
-        'ds_name': 'staresina'
+        'ds_name': 'staresina',
+        'dB': True,  # whether to plot psd in dB scale
+        'focus_range': [100, 110],  # in seconds, for temp_plot
     }
     userargs = proc_userargs(userargs, default_args)
     
@@ -86,7 +90,7 @@ def ckpt_report(dataset, userargs):
     if userargs['key_to_print'] is None:
         userargs['print_noise'] = userargs['print_pcs'] = False
     
-    psd = psd_plot([dataset['raw']], [userargs['ckpt_name']], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], save_pth=os.path.join(save_fdr, f"psd.png"), picks=picks)
+    psd = psd_plot([dataset['raw']], [userargs['ckpt_name']], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], save_pth=os.path.join(save_fdr, f"psd.png"), picks=picks, dB=userargs['dB'])
     std = np.mean(np.std(dataset['raw'].get_data(picks=userargs['std_channel_pick'], reject_by_annotation='omit'), axis=1))
     plot_channel_dists(dataset['raw'], os.path.join(save_fdr, f"std={std:.4e}.png"))
     
@@ -95,18 +99,18 @@ def ckpt_report(dataset, userargs):
         print_fdr = os.path.join(save_fdr, extra_str)
         ensure_dir(print_fdr)
         
-        psd_plot([dataset['raw']], [ch_name], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], picks=ch_name, save_pth=os.path.join(print_fdr, f"{ch_name}_psd.png"))
+        psd_plot([dataset['raw']], [ch_name], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], picks=ch_name, save_pth=os.path.join(print_fdr, f"{ch_name}_psd.png"), dB=userargs['dB'])
         temp_plot(dataset['raw'], ch_name, fs=fs, save_pth=os.path.join(print_fdr, f"{ch_name}.png"), name=ch_name)
-        temp_plot(dataset['raw'], ch_name, fs=fs, start=100*fs, length=10*fs, save_pth=os.path.join(print_fdr, f"{ch_name}_100-110.png"),name=ch_name)
+        temp_plot(dataset['raw'], ch_name, fs=fs, start=userargs['focus_range'][0]*fs, length=(userargs['focus_range'][1]-userargs['focus_range'][0])*fs, save_pth=os.path.join(print_fdr, f"{ch_name}_{userargs['focus_range'][0]}-{userargs['focus_range'][1]}.png"), name=ch_name)
         if 'ckpt_raw' in dataset:
             if dataset['ckpt_raw'].info['sfreq'] != dataset['raw'].info['sfreq']:
                 dataset['ckpt_raw'].resample(dataset['raw'].info['sfreq'])
             if not userargs['qrs_event']:
                 temp_plot_diff(dataset['ckpt_raw'], dataset['raw'], ch_name, fs=fs, save_pth=os.path.join(print_fdr, f"{ch_name}_diff.png"),name=ch_name)
-                temp_plot_diff(dataset['ckpt_raw'], dataset['raw'], ch_name, fs=fs, start=100*fs, length=10*fs, save_pth=os.path.join(print_fdr, f"{ch_name}_100-110_diff.png"), name=ch_name)
+                temp_plot_diff(dataset['ckpt_raw'], dataset['raw'], ch_name, fs=fs, start=userargs['focus_range'][0]*fs, length=(userargs['focus_range'][1]-userargs['focus_range'][0])*fs, save_pth=os.path.join(print_fdr, f"{ch_name}_{userargs['focus_range'][0]}-{userargs['focus_range'][1]}_diff.png"), name=ch_name)
             else:
                 temp_plot_diff(dataset['ckpt_raw'], dataset['raw'], ch_name, fs=fs, save_pth=os.path.join(print_fdr, f"{ch_name}_diff.png"),name=ch_name, events=dataset['bcg_ep'].events, event_id=999)
-                temp_plot_diff(dataset['ckpt_raw'], dataset['raw'], ch_name, fs=fs, start=100*fs, length=10*fs, save_pth=os.path.join(print_fdr, f"{ch_name}_100-110_diff.png"), name=ch_name, events=dataset['bcg_ep'].events, event_id=999)
+                temp_plot_diff(dataset['ckpt_raw'], dataset['raw'], ch_name, fs=fs, start=userargs['focus_range'][0]*fs, length=(userargs['focus_range'][1]-userargs['focus_range'][0])*fs, save_pth=os.path.join(print_fdr, f"{ch_name}_{userargs['focus_range'][0]}-{userargs['focus_range'][1]}_diff.png"), name=ch_name, events=dataset['bcg_ep'].events, event_id=999)
     
     channel_to_print = psd.ch_names
     if len(channel_to_print) > 3:
@@ -130,10 +134,10 @@ def ckpt_report(dataset, userargs):
         noise_fdr_name = os.path.join(dataset['pf'].get_fdr_dict()['prep'], "ckpt", subject, f"noise_{userargs['key_to_print']}")
         ensure_dir(noise_fdr_name)
         for ch_name in channel_to_print:
-            psd_plot([dataset[f"noise_{userargs['key_to_print']}"]], [ch_name], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], picks=[ch_name], save_pth=os.path.join(noise_fdr_name, f"{ch_name}_psd.png"))
+            psd_plot([dataset[f"noise_{userargs['key_to_print']}"]], [ch_name], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], picks=[ch_name], save_pth=os.path.join(noise_fdr_name, f"{ch_name}_psd.png"), dB=userargs['dB'])
             temp_plot(dataset[f"noise_{userargs['key_to_print']}"], ch_name, fs=fs, save_pth=os.path.join(noise_fdr_name, f"{ch_name}.png"), name=ch_name)
         
-        psd_plot([dataset[f"noise_{userargs['key_to_print']}"]], ['noise'], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], save_pth=os.path.join(noise_fdr_name, f"noise_psd.png"), picks=channel_to_print)
+        psd_plot([dataset[f"noise_{userargs['key_to_print']}"]], ['noise'], res_mult=userargs['res_mult'], fs=fs, figsize=(10, 3), fmax=userargs['max_freq'], save_pth=os.path.join(noise_fdr_name, f"noise_psd.png"), picks=channel_to_print, dB=userargs['dB'])
     
     dataset['ckpt_raw'] = copy.deepcopy(dataset['raw'])
     return dataset
@@ -341,13 +345,18 @@ def epoch_sw_pca(dataset, userargs):
     overwrite = userargs.get('overwrite', 'new')
     do_align = userargs.get('do_align', False)
     remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
-    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_safe" is used for PC calculation
-    if spurious_event:
-        raise NotImplementedError("Spurious event is not implemented yet.")
+    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_screener" is used for PC calculation
     
     assert not do_align, "Alignment not implemented yet."
-    safe_key = epoch_key + "_safe" if spurious_event else epoch_key
-    orig_data = torch.tensor(dataset[safe_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
+    orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
+
+    if spurious_event:
+        raise NotImplementedError("Spurious event not implemented yet, please set spurious_event=False.")
+        screener = dataset[f"{epoch_key}_screener"]
+        epoch_std = orig_data[screener].std(dim=(1,2))  
+        within_3_std = epoch_std < (epoch_std.mean()+3*epoch_std.std())
+        screener = screener[within_3_std]
+    
     pca_mean = torch.mean(orig_data, dim=2) * int(remove_mean)    # 29+#win, #ch
     det_orig_data = orig_data - pca_mean.unsqueeze(2)
     spurious_data = det_orig_data.unfold(0, window_length, 1)  # #win, #ch, len(ep), len(win)=#ep
@@ -406,6 +415,8 @@ def epoch_aas(dataset, userargs):
     window_length = userargs.get('window_length', 10)
     picks = userargs.get('picks', 'eeg')
     overwrite = userargs.get('overwrite', 'new')
+    fit = userargs.get('fit', False)  # if False, standard AAS is used. if True, the avg template is fitted to the data first and then subtracted.
+    
     
     orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
     spurious_data = orig_data.unfold(0, window_length, 1)  # #win, #ch, len(ep), len(win)=#ep
@@ -415,9 +426,12 @@ def epoch_aas(dataset, userargs):
     padding = torch.repeat_interleave(all_pcs[0:1], window_length-1, dim=0)
     all_pcs = torch.cat([padding, all_pcs], dim=0)    # 29+#win, #ch, len(ep), #pc
     
-    # noise = lstsq(all_pcs, orig_data)[0].unsqueeze(-1)   # 29+#win, #ch, #pc, 1
-    # noise = (all_pcs @ noise)[...,0]
-    cleaned = np.array(orig_data - all_pcs.squeeze())
+    if fit:
+        noise = lstsq(all_pcs, orig_data)[0].unsqueeze(-1)   # 29+#win, #ch, #pc, 1
+        noise = (all_pcs @ noise)[...,0]
+        cleaned = np.array(orig_data - noise)
+    else:
+        cleaned = np.array(orig_data - all_pcs.squeeze())
     
     pc_name = f"pc_{epoch_key}"
     noise_name = f"noise_{epoch_key}"
@@ -449,6 +463,64 @@ def epoch_aas(dataset, userargs):
     return dataset
     
 
+def impulse_removal(dataset, userargs):
+    picks = userargs.get('picks', 'all')
+    thres = userargs.get('thres', 3.0)
+    iteration = userargs.get('iteration', 1)  # number of iterations to perform impulse removal, 0 or negative means infinite iterations
+    
+    bad_exist = False
+    data = dataset['raw'].get_data(picks=picks)  # #ch, #timepoints
+    data_abs_diff = np.abs(data[:, 1:] - data[:, :-1])  # #ch, #timepoints-1
+    avg, std = np.mean(data_abs_diff, axis=1), np.std(data_abs_diff, axis=1)  # #ch,
+    thres = avg + thres * std  # #ch,
+    
+    mask = data_abs_diff > thres[:, None]  # #ch, #timepoints-1
+    mask = np.concatenate([np.zeros((mask.shape[0], 1), dtype=bool), mask], axis=1)  # #ch, #timepoints
+    
+    interp_data = data.copy()
+    for ch in range(data.shape[0]):
+        bad_idx = np.where(mask[ch])[0]
+        good_idx = np.where(~mask[ch])[0]
+        if len(bad_idx) > 0:
+            interp_data[ch, bad_idx] = np.interp(bad_idx, good_idx, data[ch, good_idx])
+            bad_exist = True
+
+    dataset['raw']._data[pick_indices(dataset['raw'], picks)] = interp_data  # Update the raw data with the interpolated data
+    
+    if not bad_exist or iteration == 1:
+        return dataset
+    else:
+        userargs['iteration'] = iteration - 1
+        return impulse_removal(dataset, userargs)    
+
+def epoch_impulse_removal(dataset, userargs):
+    epoch_key = userargs.get('epoch_key', 'tr_ep')
+    overwrite = userargs.get('overwrite', 'new')
+    picks = userargs.get('picks', 'all')
+    thres = userargs.get('thres', 3.0)
+    
+    orig_data = dataset[epoch_key].get_data(picks=picks)  # #ep, #ch, len(ep)
+    abs_diff_data = np.abs(orig_data[:, :, 1:] - orig_data[:, :, :-1])  # #ep, #ch, len(ep)-1
+    avg, std = np.mean(abs_diff_data, axis=-1), np.std(abs_diff_data, axis=-1)
+    thres = avg + thres * std  # #ep, #ch
+    mask = abs_diff_data > thres[:, :, None]  # #ep, #ch, len(ep)-1
+    interp_data = orig_data.copy()
+    
+    for ep in range(orig_data.shape[0]):
+        for ch in range(orig_data.shape[1]):
+            ep_data = orig_data[ep, ch, :]
+            ep_mask = np.concatenate([mask[ep, ch, :], np.zeros((1,), dtype=bool)])  # #timepoints
+            
+            bad_idx  = np.flatnonzero(ep_mask)
+            good_idx = np.flatnonzero(~ep_mask)
+            
+            if bad_idx.size > 0:
+                interp_data[ep, ch, bad_idx] = np.interp(bad_idx, good_idx, ep_data[good_idx])
+    
+    dataset['raw'] = mne_epoch2raw(dataset[epoch_key], dataset['raw'], interp_data, tmin=dataset[epoch_key].tmin, overwrite=overwrite, picks=picks)
+    return dataset
+    
+
 # def channel_pca(dataset, userargs):
 #     npc = userargs.get('npc', 3)
 #     picks = userargs.get('picks', 'eeg')
@@ -468,12 +540,30 @@ def epoch_pca(dataset, userargs):
     picks = userargs.get('picks', 'eeg')
     overwrite = userargs.get('overwrite', 'obs')
     remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
-    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_safe" is used for PC calculation
+    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_screener" is used for PC calculation
+    screen_high_power = userargs.get('screen_high_power', None)  # if True, the epochs with high power would not be used for PC calculation. If None, no screening is performed. If false, only the epochs with high power would be used for PC calculation.
     
-    safe_key = epoch_key + "_safe" if spurious_event else epoch_key
-    orig_data = torch.tensor(dataset[safe_key].get_data(picks=picks)) # #ep, #ch, len(ep)
+    
+    orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks)) # #ep, #ch, len(ep)
+    if spurious_event:
+        screener = dataset[f"{epoch_key}_screener"]
+        orig_data = orig_data[screener]
+    
+    if not screen_high_power is None:
+        epoch_power = torch.sum(orig_data**2, dim=(1,2)) # #ep
+        power_med = epoch_power.median()
+        power_mad = torch.median(torch.abs(epoch_power - power_med))
+        threshold = power_med + 3*power_mad
+        orig_data = orig_data[epoch_power < threshold] if screen_high_power else orig_data[epoch_power >= threshold]
+        
+    
     # orig_data = orig_data.reshape(*orig_data.shape[1:], orig_data.shape[0])
     orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
+    
+    epoch_std = orig_data.std(dim=(0,1))
+    normal_ep = epoch_std < (epoch_std.mean() + 3*epoch_std.std())
+    orig_data = orig_data[..., normal_ep]  # #ch, len(ep), #ep
+    
     pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
     dirty_data = orig_data - pca_mean.unsqueeze(1)
     if force_mean_pc0:
@@ -486,12 +576,12 @@ def epoch_pca(dataset, userargs):
         U, S, _ = torch.pca_lowrank(dirty_data)   # #ch, len(ep), q;    # #ch, q
         all_pcs = U[..., :npc]*S[..., None, :npc]
         
-    if spurious_event:
-        del orig_data, dirty_data, U, S  # free memory
-        orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # #ep, #ch, len(ep)
-        orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
-        pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
-        dirty_data = orig_data - pca_mean.unsqueeze(1)  # #ch, len(ep), #ep
+    # if spurious_event:
+    del orig_data, dirty_data, U, S  # free memory
+    orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # #ep, #ch, len(ep)
+    orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
+    pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
+    dirty_data = orig_data - pca_mean.unsqueeze(1)  # #ch, len(ep), #ep
     noise = lstsq(all_pcs, dirty_data)[0]   # #ch, #pc, #ep
     noise = all_pcs @ noise + pca_mean.unsqueeze(1)  # #ch, len(ep), #ep
     cleaned = np.array((orig_data - noise).permute(2, 0, 1))
@@ -500,15 +590,21 @@ def epoch_pca(dataset, userargs):
     noise_name = f"noise_{epoch_key}"
     picks_name = f"picks_{epoch_key}"
         
-    assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
-    assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
-    assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
-    # if pc_name in dataset:
-        # pc_name = pc_name + "_"
-    # if noise_name in dataset:
-        # noise_name = noise_name + "_"
-    # if picks_name in dataset:
-        # picks_name = picks_name + "_"
+    # assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    # assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    # assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
+
+    while True:
+        if pc_name in dataset:
+            pc_name = pc_name + "_"
+            continue
+        if noise_name in dataset:
+            noise_name = noise_name + "_"
+            continue
+        if picks_name in dataset:
+            picks_name = picks_name + "_"
+            continue
+        break
         
     dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
         
@@ -548,7 +644,7 @@ def qrs_detect(dataset, userargs):
         peaks += dataset['raw'].first_samp
         ecg = np.column_stack([peaks, np.zeros(len(peaks)), 999*np.ones(len(peaks))]).astype(np.int64)
         if correct:
-            ecg, spurious_ecg = qrs_correction(ecg, dataset['raw'], ecg_data, new_event_idx=999)
+            safe_event_screener, spurious_ecg = qrs_correction(ecg, dataset['raw'], ecg_data, new_event_idx=999)
     else:
         ecg = QRSDetector(dataset['raw'], ch_name=bcg_name, l_freq=l_freq, h_freq=h_freq).get_events(correction=correct, method=method)
         raise NotImplementedError(f"Method {method} not implemented for QRS detection.")
@@ -556,8 +652,9 @@ def qrs_detect(dataset, userargs):
     r_list = spurious_ecg[:,0]
     half_ep_size = np.median(np.diff(r_list)) * median_mult / dataset['raw'].info['sfreq']
  
-    dataset['bcg_ep_safe'] = mne.Epochs(dataset['raw'], events=ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
+    # dataset['bcg_ep_safe'] = mne.Epochs(dataset['raw'], events=ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
     dataset['bcg_ep'] = mne.Epochs(dataset['raw'], events=spurious_ecg, tmin=delay-half_ep_size, tmax=delay+half_ep_size, event_id=999, baseline=None, proj=False)
+    dataset['bcg_ep_screener'] = [ep_idx for ep_idx, event_idx in enumerate(safe_event_screener) if event_idx in dataset['bcg_ep'].selection]
     
     if random:
         # randomly sample same number of epochs, with the same length of bcg_ep

@@ -324,7 +324,13 @@ def qrs_correction(ecg_event, raw, ecg_signal, max_heart_rate=160, min_heart_rat
     else:
         spurious_event = new_event.copy()
     
-    return (new_event, spurious_event)
+    safe_event_screener = []
+    for idx, ev in enumerate(spurious_event):
+        if spurious_event[idx, 0] in new_event[:,0]:
+            safe_event_screener.append(idx)
+    
+    return (safe_event_screener, spurious_event)
+    # return (new_event, spurious_event)
     # return (new_event, spurious_event) if iterations <= 0 else qrs_correction(new_event, raw, operator, max_heart_rate, min_heart_rate, new_event_idx, iterations=iterations, corr_thres=corr_thres)
 
 class QRSDetector:

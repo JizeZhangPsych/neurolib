@@ -180,7 +180,7 @@ def filename2subj(filename, ds_name='staresina'):
         return filename.split('/')[-1].split('.')[0]
     
 
-def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, res_mult=32, figsize=(20,3), save_pth=None, debug=False):
+def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, res_mult=32, figsize=(20,3), save_pth=None, debug=False, dB=True):
     """
     Plot the power spectral density (PSD) of a list of EEG data.
     Parameters
@@ -239,14 +239,14 @@ def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, re
         while True:
             try:
                 psd = eeg.compute_psd(fmin=fmin, fmax=fmax, n_fft=n_fft, picks=picks)
-                psd.plot(axes=ax[idx], picks=picks)
+                psd.plot(axes=ax[idx], picks=picks, dB=dB)
                 break
             except ValueError as e:
                 if 'NaN' in str(e):
                     n_fft = n_fft // 2
                     print(f'WARNING: PSD calculation failed, trying again with a smaller n_fft {n_fft}')
                 elif 'axes must be an array-like of length' in str(e):
-                    fig_psd = psd.plot(show=False)
+                    fig_psd = psd.plot(show=False, dB=dB)
                     if save_pth is None:
                         save_pth = "./foobar.png"
                     fig_psd.savefig(f"{save_pth}_{name}_{idx}.png")
@@ -473,7 +473,7 @@ def pcs_plot(pcs, target_fdr, ch_list, ch_names, info, win_list=None, figsize=(2
     
     x = np.arange(pcs.shape[-2]) / fs
     n_fft = np.power(2, np.round(np.log2(fs))).astype(np.int64)   # signal length is around 1s
-    psd2db = lambda psd_data: 10*np.log10(np.maximum(psd_data*1e12, np.finfo(float).tiny))
+    # psd2db = lambda psd_data: 10*np.log10(np.maximum(psd_data*1e12, np.finfo(float).tiny))
     if len(pcs.shape) == 3:
         for ch_name in ch_list:
             # ch_name = ch_names[ch]
@@ -487,7 +487,7 @@ def pcs_plot(pcs, target_fdr, ch_list, ch_names, info, win_list=None, figsize=(2
                 axs[npc,0].legend()
                 
                 freqs, psd = welch(pcs[ch_idx, :, npc], fs, nperseg=min(n_fft,pcs.shape[-2]))
-                axs[npc,1].plot(freqs, psd2db(psd), label="PSD")
+                axs[npc,1].plot(freqs, psd, label="PSD")
                 axs[npc,1].set_title(f"PC{npc} PSD for channel {ch_name}")
                 axs[npc, 1].set_xlim([0, 40])
                 axs[npc,1].legend()
@@ -509,7 +509,7 @@ def pcs_plot(pcs, target_fdr, ch_list, ch_names, info, win_list=None, figsize=(2
                     axs[npc, 0].legend()
                     
                     freqs, psd = welch(pcs[win_idx, ch_idx, :, npc], fs, nperseg=min(n_fft, pcs.shape[-2]))
-                    axs[npc,1].plot(freqs, psd2db(psd), label="PSD")
+                    axs[npc,1].plot(freqs, psd , label="PSD")
                     axs[npc, 1].set_title(f"PC{npc} PSD for No. {win_idx} window of channel {ch_name}")
                     axs[npc, 1].set_xlim([0, 40])
                     axs[npc, 1].set_ylim(bottom=-20)
