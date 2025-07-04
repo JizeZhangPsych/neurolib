@@ -140,21 +140,29 @@ class Pathfinder:
     def get_polhemus_file(self, subj_str):
         raise NotImplementedError("Not implemented yet")
     
-def parse_subj(subject, digit_only=False):
-    if digit_only:
+def parse_subj(subject, digit_only=False, ds_name='staresina'):
+    if ds_name == 'staresina':
         subj_dict = {
             "subj": f"{subject[:-3].zfill(3)}",
             "ses": f"0{subject[-3]}",
             "run": f"0{subject[-2]}",
             "block": f"0{subject[-1]}"
         }    
-    else:
+        if not digit_only:
+            subj_dict["subj"] = f"sub-{subj_dict['subj']}"
+            subj_dict["ses"] = f"ses-{subj_dict['ses']}"
+            subj_dict["run"] = f"run-{subj_dict['run']}"
+            subj_dict["block"] = f"block-{subj_dict['block']}"
+    elif ds_name == 'irene':
         subj_dict = {
-            "subj": f"sub-{subject[:-3].zfill(3)}",
-            "ses": f"ses-0{subject[-3]}",
-            "run": f"run-0{subject[-2]}",
-            "block": f"block-0{subject[-1]}"
+            "subj": f"{subject[:2]}",
+            "visit": f"{subject[-2]}",
+            "block": f"{subject[-1]}"
         }
+        if not digit_only:
+            subj_dict["subj"] = f"s{subj_dict['subj']}"
+            # visit is used differently in folder name and file name, so we just keep it as is
+            subj_dict["block"] = f"block{subj_dict['block']}"
     return subj_dict
 
 def filename2subj(filename, ds_name='staresina'):
@@ -177,8 +185,18 @@ def filename2subj(filename, ds_name='staresina'):
         filename = filename.split('/')[-1].split('.')[0]
         return filename
     elif ds_name == 'irene':
-        return filename.split('/')[-1].split('.')[0]
-    
+        filename = filename.split('/')[-1]
+        match = re.search(r's(\d\d)_mrEEG(\d)_block(\d).*\.cdt', filename)
+        if match:
+            subj = match.group(1)
+            visit = match.group(2)
+            block = match.group(3)
+            subject_identifier = subj + visit + block
+            return subject_identifier
+        else:
+            match = re.search(r'(\d+)_preproc-raw.fif', filename)
+            subject = match.group(1)
+            return subject
 
 def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, res_mult=32, figsize=(20,3), save_pth=None, debug=False, dB=True):
     """
@@ -732,3 +750,46 @@ class HeteroStudy:
         for study in self.study_list:
             out += study.get(check_exist=check_exist, **kwargs)
         return out
+    
+
+class EEGDictMeta(type):
+    def __call__(cls, *args, **kwargs):
+        return cls.get(*args, **kwargs)
+
+class SingletonEEG(metaclass=EEGDictMeta):
+    """Singleton class for loading an example EEG file once and reusing it.
+    This class is used to avoid loading the EEG file multiple times, which can be time-consuming.
+    
+    Example usage: Irene dataset lack a dev_head_t matrix, so we need to load it from another eeg file.
+    """
+    
+    _raw = None
+    _loaded_pth = None
+    
+    @classmethod
+    def get(cls, file_path=None, safe_reload=True, preload=False):
+        """Get the singleton instance of an example eeg file.
+        
+        Parameters:
+        file_path (str): Path to the EEG file to load.
+        keys (list): List of keys to extract from the EEG file. any key should be a property extractable via raw.key, e.g. ['info', 'first_samp', 'ch_names', '_data', 'annotations'].
+        info_keys (list): List of keys to extract from the EEG info.
+        safe_reload (bool): If True, when loading this dict again, it will check if the file path and keys are either none or the same as the one loaded before. If not, would raise an error.
+        
+        Returns:
+        ExampleEEGSingletonLoader: The singleton instance of a dictionary, containing all keys from the eeg raw class.
+        """
+        if cls._raw is None:
+            if file_path.endswith('.edf'):
+                eeg = mne.io.read_raw_edf(file_path, preload=preload)
+            else:
+                raise ValueError("Unsupported file format. Only .edf files are supported.")
+            
+            cls._raw = eeg
+            cls._loaded_pth = file_path
+            del eeg
+        elif safe_reload and file_path is not None:
+            if file_path != cls._loaded_pth:
+                raise ValueError(f"File path {file_path} does not match the previously loaded file path {cls._loaded_pth}. Use the same file path or None to reload the singleton.")
+            
+        return cls._raw

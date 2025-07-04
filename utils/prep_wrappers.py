@@ -1,4 +1,4 @@
-import os, re, math, random, copy, pickle
+import os, re, glob, copy, pickle
 from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,7 +10,7 @@ import mne
 from mne.preprocessing import find_ecg_events
 from osl_ephys.report.preproc_report import plot_channel_dists # usage: plot_channel_dists(raw, savebase)
 from .util import ensure_dir, proc_userargs
-from .eeg import psd_plot, temp_plot, temp_plot_diff, mne_epoch2raw, parse_subj, filename2subj, HeteroStudy as Study, Pathfinder, find_spurious_channels, pcs_plot, pick_indices
+from .eeg import psd_plot, temp_plot, temp_plot_diff, mne_epoch2raw, parse_subj, filename2subj, HeteroStudy as Study, Pathfinder, find_spurious_channels, pcs_plot, pick_indices, SingletonEEG
 from .qrs import kteager_detect, qrs_correction, QRSDetector
 from ecgdetectors import panPeakDetect
 from mne.preprocessing import ICA
@@ -19,6 +19,9 @@ spurious_subject_list = ['13121', '8111', '8112', '8121', '17111', '17112', '311
 
 def initialize(dataset, userargs):
     ds_name = userargs.get('ds_name', 'staresina')
+    
+    if ds_name == 'irene':  # for irene, dev_head_t is note set, so we need to set it to identity
+        dataset['raw'].info['dev_head_t'] = SingletonEEG("/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/edfs/sub-003_ses-01_run-01_block-01_task-resting_convert.cdt.edf").info['dev_head_t']
     
     dataset['pf'] = Pathfinder(**userargs)
     dataset['orig_sfreq'] = dataset['raw'].info['sfreq']
@@ -144,38 +147,52 @@ def ckpt_report(dataset, userargs):
 
 def set_channel_montage(dataset, userargs):
     correct_sign = userargs.get('correct_sign', True)
-    dpo_files = Study([
-        os.path.join(dataset['pf'].get_fdr_dict()['base'], "sub-{subj}/eeg/sub-{subj}_ses-{ses}_run-{run}_{foo}rest{foo2}block-{block}.cdt.dpo"),
-        os.path.join(dataset['pf'].get_fdr_dict()['base'], "sub-{subj}/eeg/sub-{subj}_ses-{ses}_run-{run}_block-{block}{foo}rest{foo2}.cdt.dpo"),
-        os.path.join(dataset['pf'].get_fdr_dict()['base'], "sub-{subj}/ses-{ses}/eeg/sub-{subj}_ses-{ses}_run-{run}_block-{block}{foo1}rest{foo2}.cdt.dpo")
-    ])
-    subject = filename2subj(dataset['raw'].filenames[0])
-    subj_dict = parse_subj(subject, True)
-    dpo = dpo_files.get(subj=subj_dict["subj"], ses=subj_dict["ses"], block=subj_dict["block"], run=subj_dict["run"])
-    assert len(dpo) == 1
-    dpo = dpo[0]
-    with open(dpo, 'r') as f:
-        dpo_content = f.read()
-    dpo_content = re.sub(r"#.*?\n", "\n", dpo_content)  # Remove comments
-    labels_list_match = re.search(r"LABELS START_LIST([\s\S]*?)LABELS END_LIST", dpo_content)
-    assert labels_list_match is not None
-    labels_data = labels_list_match.group(1).strip().splitlines()
+    ds_name = userargs.get('ds_name', 'staresina')
     
-    sensors_list_match = re.search(r"SENSORS START_LIST([\s\S]*?)SENSORS END_LIST", dpo_content)
-    assert sensors_list_match is not None
-    sensors_data = sensors_list_match.group(1).strip().splitlines()
-    sensors = np.array([line.split() for line in sensors_data], dtype=np.float64)
-    
-    if correct_sign:
-        sign_x = (sensors[labels_data.index('C6')][0] > sensors[labels_data.index('C5')][0]) * 2 - 1
-        sign_y = (sensors[labels_data.index('Fz')][1] > sensors[labels_data.index('Pz')][1]) * 2 - 1
-        sign_z = (sensors[labels_data.index('Cz')][2] > np.mean(sensors[:,2])) * 2 - 1
-        sensors = [[sign_x*x,sign_y*y,sign_z*z] for x,y,z in sensors] 
+    if ds_name == 'staresina':
+        dpo_files = Study([
+            os.path.join(dataset['pf'].get_fdr_dict()['base'], "sub-{subj}/eeg/sub-{subj}_ses-{ses}_run-{run}_{foo}rest{foo2}block-{block}.cdt.dpo"),
+            os.path.join(dataset['pf'].get_fdr_dict()['base'], "sub-{subj}/eeg/sub-{subj}_ses-{ses}_run-{run}_block-{block}{foo}rest{foo2}.cdt.dpo"),
+            os.path.join(dataset['pf'].get_fdr_dict()['base'], "sub-{subj}/ses-{ses}/eeg/sub-{subj}_ses-{ses}_run-{run}_block-{block}{foo1}rest{foo2}.cdt.dpo")
+        ])
+        subject = filename2subj(dataset['raw'].filenames[0])
+        subj_dict = parse_subj(subject, True)
+        dpo = dpo_files.get(subj=subj_dict["subj"], ses=subj_dict["ses"], block=subj_dict["block"], run=subj_dict["run"])
+        assert len(dpo) == 1
+        dpo = dpo[0]
+        with open(dpo, 'r') as f:
+            dpo_content = f.read()
+        dpo_content = re.sub(r"#.*?\n", "\n", dpo_content)  # Remove comments
+        labels_list_match = re.search(r"LABELS START_LIST([\s\S]*?)LABELS END_LIST", dpo_content)
+        assert labels_list_match is not None
+        labels_data = labels_list_match.group(1).strip().splitlines()
+        
+        sensors_list_match = re.search(r"SENSORS START_LIST([\s\S]*?)SENSORS END_LIST", dpo_content)
+        assert sensors_list_match is not None
+        sensors_data = sensors_list_match.group(1).strip().splitlines()
+        sensors = np.array([line.split() for line in sensors_data], dtype=np.float64)
+        
+        if correct_sign:
+            sign_x = (sensors[labels_data.index('C6')][0] > sensors[labels_data.index('C5')][0]) * 2 - 1
+            sign_y = (sensors[labels_data.index('Fz')][1] > sensors[labels_data.index('Pz')][1]) * 2 - 1
+            sign_z = (sensors[labels_data.index('Cz')][2] > np.mean(sensors[:,2])) * 2 - 1
+            sensors = [[sign_x*x,sign_y*y,sign_z*z] for x,y,z in sensors] 
 
-    sensors = np.array(sensors)*1e-3
-    ch_pos = {ch: loc for ch, loc in zip(labels_data, sensors)}
-    custom_montage = mne.channels.make_dig_montage(ch_pos=ch_pos, coord_frame='head')
-    dataset["raw"].set_montage(custom_montage)
+        sensors = np.array(sensors)*1e-3
+        ch_pos = {ch: loc for ch, loc in zip(labels_data, sensors)}
+        custom_montage = mne.channels.make_dig_montage(ch_pos=ch_pos, coord_frame='head')
+        dataset["raw"].set_montage(custom_montage)
+    elif ds_name == 'irene':
+        subject = filename2subj(dataset['raw'].filenames[0], ds_name=ds_name)
+        subj_dict = parse_subj(subject, True, ds_name='irene')
+        
+        bcg_file_pth = f"/ohba/pi/knobre/irene/data_for_jize/curry_clean/visit{subj_dict['visit']}/s{subj_dict['subj']}/s{subj_dict['subj']}_mrEEG{subj_dict['visit']}_block{subj_dict['block']}_mr_bcg_clean.cdt"
+        if not os.path.exists(bcg_file_pth):
+            bcg_file_pth = f"/ohba/pi/knobre/irene/data_for_jize/curry_clean/visit{subj_dict['visit']}/s{subj_dict['subj']}/s{subj_dict['subj']}_mrEEG_visit{subj_dict['visit']}_block{subj_dict['block']}_mr_bcg_clean.cdt"
+        
+        bcg_file = mne.io.read_raw_curry(bcg_file_pth, preload=True)
+        dataset["raw"].set_montage(copy.deepcopy(bcg_file.get_montage()))
+        del bcg_file
 
     return dataset
 
@@ -196,7 +213,7 @@ def crop_TR(dataset, userargs):
     if event_name is None:
         event_name = '1200002'
     # def crop_eeg_to_tr(eeg, change_onset=True):   
-    def crop_eeg_to_tr(eeg, num_edge_TR=0):   
+    def crop_eeg_to_tr(eeg, tmin, num_edge_TR=0):   
         try:
             trig = mne.events_from_annotations(eeg)[1][str(event_name)]
         except KeyError:
@@ -208,11 +225,13 @@ def crop_TR(dataset, userargs):
                 if start_point == -1:
                     start_point = timepoint - eeg.first_samp
                 end_point = timepoint+TR*freq - eeg.first_samp
-                
-        eeg = eeg.crop(tmin=start_point/freq+tmin+num_edge_TR*TR, tmax=end_point/freq-num_edge_TR*TR)  
+        
+        new_tmin = max(start_point/freq+tmin+num_edge_TR*TR, eeg.tmin)
+        tmax = min(end_point/freq+num_edge_TR*TR, eeg.tmax)
+        eeg = eeg.crop(tmin=new_tmin, tmax=tmax)  
         return eeg
     
-    dataset["raw"] = crop_eeg_to_tr(dataset["raw"], num_edge_TR=num_edge_TR)
+    dataset["raw"] = crop_eeg_to_tr(dataset["raw"], tmin=tmin, num_edge_TR=num_edge_TR)
     return dataset 
 
 def set_channel_type_raw(dataset, userargs):
