@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import loadmat
 import torch
+from sklearn.decomposition import PCA
+from scipy.linalg import lstsq as scipy_lstsq
 from torch.linalg import lstsq
 
 import mne
@@ -227,8 +229,8 @@ def crop_TR(dataset, userargs):
                 end_point = timepoint+TR*freq - eeg.first_samp
         
         new_tmin = max(start_point/freq+tmin+num_edge_TR*TR, eeg.tmin)
-        tmax = min(end_point/freq+num_edge_TR*TR, eeg.tmax)
-        eeg = eeg.crop(tmin=new_tmin, tmax=tmax)  
+        tmax = min(end_point/freq-num_edge_TR*TR, eeg.tmax)
+        eeg = eeg.crop(tmin=new_tmin, tmax=tmax, include_tmax=False)  
         return eeg
     
     dataset["raw"] = crop_eeg_to_tr(dataset["raw"], tmin=tmin, num_edge_TR=num_edge_TR)
@@ -252,7 +254,7 @@ def set_channel_type_raw(dataset, userargs):
 def create_epoch(dataset, userargs):
     event = userargs.get('event', 'TR')
     tmin = userargs.get('tmin', -0.04*1.14)    # remember changing 1.14 to 0.07 if event = slice!
-    tmax = userargs.get('tmax', 0.97*1.14)
+    tmax = userargs.get('tmax', 0.97*1.14)      # note that the 'tmax' is in a matlab style, i.e. tmax-tmin is not the length of the epoch, but +1 timepoint
     random = userargs.get('random', False)
     event_name = userargs.get('event_name', None)
     epoch_name_diy = userargs.get('epoch_name', None)   # if None, will be set to event + '_ep' or event + '_ep_rand' if random is True
@@ -435,6 +437,7 @@ def epoch_aas(dataset, userargs):
     picks = userargs.get('picks', 'eeg')
     overwrite = userargs.get('overwrite', 'new')
     fit = userargs.get('fit', False)  # if False, standard AAS is used. if True, the avg template is fitted to the data first and then subtracted.
+    rev = userargs.get('rev', False)
     
     
     orig_data = torch.tensor(dataset[epoch_key].get_data(picks=picks))  # 29+#win, #ch, len(ep)
@@ -442,8 +445,12 @@ def epoch_aas(dataset, userargs):
 
     all_pcs = torch.mean(spurious_data, dim=-1).unsqueeze(-1)  # #win, #ch, len(ep), 1
     
-    padding = torch.repeat_interleave(all_pcs[0:1], window_length-1, dim=0)
-    all_pcs = torch.cat([padding, all_pcs], dim=0)    # 29+#win, #ch, len(ep), #pc
+    if not rev:
+        padding = torch.repeat_interleave(all_pcs[0:1], window_length-1, dim=0)
+        all_pcs = torch.cat([padding, all_pcs], dim=0)    # 29+#win, #ch, len(ep), #pc
+    else:
+        padding = torch.repeat_interleave(all_pcs[-1:], window_length-1, dim=0)
+        all_pcs = torch.cat([all_pcs, padding], dim=0)
     
     if fit:
         noise = lstsq(all_pcs, orig_data)[0].unsqueeze(-1)   # 29+#win, #ch, #pc, 1
@@ -550,8 +557,159 @@ def epoch_impulse_removal(dataset, userargs):
 #     U, S, _ = torch.pca_lowrank(detrended.T)   # [#timepoints, q]; [q,]
 #     all_pcs = U[:, :npc]*S[None, :npc]
     
+def epoch_pca_scipy(dataset, userargs):
+    epoch_key = userargs.get('epoch_key', 'tr_ep')
+    npc = userargs.get('npc', 3)
+    force_mean_pc0 = userargs.get('force_mean', True)   # note that this mean has length of epoch_length, while the remove_mean remove the mean with length #epoch
+    picks = userargs.get('picks', 'eeg')
+    overwrite = userargs.get('overwrite', 'obs')
+    remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
+    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_screener" is used for PC calculation
+    screen_high_power = userargs.get('screen_high_power', None)  # if True, the epochs with high power would not be used for PC calculation. If None, no screening is performed. If false, only the epochs with high power would be used for PC calculation.
     
+    orig_data = dataset[epoch_key].get_data(picks=picks) # #ep, #ch, len(ep)
+    if spurious_event:
+        screener = dataset[f"{epoch_key}_screener"]
+        orig_data = orig_data[screener]
+    
+    if not screen_high_power is None:
+        epoch_power = np.sum(orig_data**2, axis=(1,2)) # #ep
+        power_med = np.median(epoch_power)
+        power_mad = np.median(np.abs(epoch_power - power_med))
+        threshold = power_med + 3*power_mad
+        orig_data = orig_data[epoch_power < threshold] if screen_high_power else orig_data[epoch_power >= threshold]
+    
+    orig_data = np.transpose(orig_data, (1, 2, 0))  # (#ch, #len(ep), #ep)
+    pca_mean = np.mean(orig_data, axis=1) * int(remove_mean)    # (#ch, #ep)
+    dirty_data = orig_data - pca_mean[:, None, :]  # (#ch, #len(ep), #ep)
+    
+    pca = PCA(n_components=npc) if not force_mean_pc0 else PCA(n_components=npc-1)
+    
+    all_pcs = np.zeros((dirty_data.shape[0], dirty_data.shape[1], npc))  # (#ch, #len(ep), #pc)
+    for ch in range(dirty_data.shape[0]):
+        if force_mean_pc0:
+            pc0 = np.mean(dirty_data[ch], axis=-1, keepdims=True)    # len(ep), 1
+            detrended = dirty_data[ch] - pc0    # (len(ep), #ep)
+            pcs = pca.fit_transform(detrended)
+            pcs = np.concatenate([pc0, pcs], axis=-1)  # (len(ep), #pc)
+        else:
+            pcs = pca.fit_transform(dirty_data[ch])
+        all_pcs[ch] = pcs
+    
+    del orig_data, dirty_data, pca_mean
+    all_pcs = torch.from_numpy(all_pcs)
+    orig_data = dataset[epoch_key].get_data(picks=picks)  # #ep, #ch, len(ep)
+    orig_data = torch.from_numpy(np.transpose(orig_data, (1, 2, 0))) # (#ch, len(ep), #ep)
+    pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)
+    dirty_data = orig_data - pca_mean[:, None, :]  # (#ch, #len(ep), #ep)
+    noise = lstsq(all_pcs, dirty_data)[0]   # (#ch, #pc, #ep)
+    noise = all_pcs @ noise + pca_mean[:, None, :]  # (#ch, #len(ep), #ep)
+    cleaned = np.array(orig_data - noise).transpose(2, 0, 1)  # #ep, #ch, len(ep)
+    pc_name = f"pc_{epoch_key}"
+    noise_name = f"noise_{epoch_key}"
+    picks_name = f"picks_{epoch_key}"
+        
+    # assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    # assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    # assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
 
+    while True:
+        if pc_name in dataset:
+            pc_name = pc_name + "_"
+            continue
+        if noise_name in dataset:
+            noise_name = noise_name + "_"
+            continue
+        if picks_name in dataset:
+            picks_name = picks_name + "_"
+            continue
+        break
+        
+    dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
+        
+    dataset[pc_name] = all_pcs
+    dataset[picks_name] = picks
+    dataset['raw'] = mne_epoch2raw(dataset[epoch_key], dataset['raw'], cleaned, tmin=dataset[epoch_key].tmin, overwrite=overwrite, picks=picks)
+    dataset[noise_name] = dataset[noise_name] - dataset['raw'].get_data()
+    dataset[noise_name] = mne.io.RawArray(dataset[noise_name], dataset['raw'].info, first_samp=dataset['raw'].first_samp)
+    return dataset
+
+def epoch_pca_scipy_flatten(dataset, userargs):
+    epoch_key = userargs.get('epoch_key', 'tr_ep')
+    npc = userargs.get('npc', 3)
+    force_mean_pc0 = userargs.get('force_mean', True)   # note that this mean has length of epoch_length, while the remove_mean remove the mean with length #epoch
+    picks = userargs.get('picks', 'eeg')
+    overwrite = userargs.get('overwrite', 'obs')
+    remove_mean = userargs.get('remove_mean', True)    # bcg obs does not remove mean with length #epoch like pca. WARNING: DO NOT use volume obs or slice pca!
+    spurious_event = userargs.get('spurious_event', False)  # if True, epoch_key is used for removal, epoch_key + "_screener" is used for PC calculation
+    screen_high_power = userargs.get('screen_high_power', None)  # if True, the epochs with high power would not be used for PC calculation. If None, no screening is performed. If false, only the epochs with high power would be used for PC calculation.
+    
+    orig_data = dataset[epoch_key].get_data(picks=picks) # #ep, #ch, len(ep)
+    if spurious_event:
+        screener = dataset[f"{epoch_key}_screener"]
+        orig_data = orig_data[screener]
+    
+    if not screen_high_power is None:
+        epoch_power = np.sum(orig_data**2, axis=(1,2)) # #ep
+        power_med = np.median(epoch_power)
+        power_mad = np.median(np.abs(epoch_power - power_med))
+        threshold = power_med + 3*power_mad
+        orig_data = orig_data[epoch_power < threshold] if screen_high_power else orig_data[epoch_power >= threshold]
+    
+    reshaped_data = orig_data.reshape(-1, orig_data.shape[-1]).T  # len(ep), #ch*#ep
+    pca_mean = np.mean(reshaped_data, axis=0) * int(remove_mean)    # (#ch*#ep)
+    dirty_data = reshaped_data - pca_mean[None, :]
+    pca = PCA(n_components=npc) if not force_mean_pc0 else PCA(n_components=npc-1)
+    
+    if force_mean_pc0:
+        pc0 = np.mean(reshaped_data, axis=1, keepdims=True)
+        detrended = reshaped_data - pc0
+        all_pcs = pca.fit_transform(detrended)
+        all_pcs = np.concatenate([pc0, all_pcs], axis=-1) # (len(ep), #pc)
+    else:
+        all_pcs = pca.fit_transform(reshaped_data)  # (len(ep), #pc)
+    
+    del orig_data, reshaped_data, dirty_data, pca_mean
+    orig_data = dataset[epoch_key].get_data(picks=picks)  # #ep, #ch, len(ep)
+    # trans_data = np.transpose(orig_data, (1, 2, 0))
+    # trans_data = trans_data.reshape(trans_data.shape[1], -1)   # len(ep), #ch*#ep,
+    trans_data = orig_data.reshape(-1, orig_data.shape[-1]).T  # len(ep), #ch*#ep
+    pca_mean = np.mean(trans_data, axis=0) * int(remove_mean)    # (#ch*#ep)
+    dirty_data = trans_data - pca_mean[None, :]
+    
+    noise = scipy_lstsq(all_pcs, dirty_data)[0]   # #pc, #ch*#ep
+    noise = all_pcs @ noise + pca_mean[None, :]  # len(ep), #ch*#ep
+    cleaned = np.array(trans_data - noise).T.reshape(*orig_data.shape)
+    pc_name = f"pc_{epoch_key}"
+    noise_name = f"noise_{epoch_key}"
+    picks_name = f"picks_{epoch_key}"
+        
+    # assert pc_name not in dataset, f"pc_name {pc_name} already exists in dataset. Please use a different name."
+    # assert noise_name not in dataset, f"noise_name {noise_name} already exists in dataset. Please use a different name."
+    # assert picks_name not in dataset, f"picks_name {picks_name} already exists in dataset. Please use a different name."
+
+    while True:
+        if pc_name in dataset:
+            pc_name = pc_name + "_"
+            continue
+        if noise_name in dataset:
+            noise_name = noise_name + "_"
+            continue
+        if picks_name in dataset:
+            picks_name = picks_name + "_"
+            continue
+        break
+        
+    dataset[noise_name] = copy.deepcopy(dataset['raw'].get_data())
+        
+    dataset[pc_name] = np.repeat(all_pcs[None], orig_data.shape[1], axis=0)
+    dataset[picks_name] = picks
+    dataset['raw'] = mne_epoch2raw(dataset[epoch_key], dataset['raw'], cleaned, tmin=dataset[epoch_key].tmin, overwrite=overwrite, picks=picks)
+    dataset[noise_name] = dataset[noise_name] - dataset['raw'].get_data()
+    dataset[noise_name] = mne.io.RawArray(dataset[noise_name], dataset['raw'].info, first_samp=dataset['raw'].first_samp)
+    return dataset
+
+    
 def epoch_pca(dataset, userargs):
     epoch_key = userargs.get('epoch_key', 'tr_ep')
     npc = userargs.get('npc', 3)
@@ -579,9 +737,9 @@ def epoch_pca(dataset, userargs):
     # orig_data = orig_data.reshape(*orig_data.shape[1:], orig_data.shape[0])
     orig_data = orig_data.permute(1, 2, 0)  # #ch, len(ep), #ep
     
-    epoch_std = orig_data.std(dim=(0,1))
-    normal_ep = epoch_std < (epoch_std.mean() + 3*epoch_std.std())
-    orig_data = orig_data[..., normal_ep]  # #ch, len(ep), #ep
+    # epoch_std = orig_data.std(dim=(0,1))
+    # normal_ep = epoch_std < (epoch_std.mean() + 3*epoch_std.std())
+    # orig_data = orig_data[..., normal_ep]  # #ch, len(ep), #ep
     
     pca_mean = torch.mean(orig_data, dim=1) * int(remove_mean)    # #ch, #ep
     dirty_data = orig_data - pca_mean.unsqueeze(1)
