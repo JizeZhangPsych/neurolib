@@ -9,6 +9,83 @@ from scipy.signal import find_peaks, welch
 
 ALL_CHANNEL_LIST = {'grad', 'mag', 'eeg', 'csd', 'stim', 'eog', 'emg', 'ecg', 'ref_meg', 'resp', 'exci', 'ias', 'syst', 'misc', 'seeg', 'dbs', 'bio', 'chpi', 'dipole', 'gof', 'ecog', 'hbo', 'hbr', 'temperature', 'gsr', 'eyetrack'}
 
+def pearson_corr(windows: np.ndarray, template: np.ndarray):
+    """
+    windows: shape (N, L) — N windows of length L
+    template: shape (L,) — single template
+    returns: shape (N,) — correlation of each window with the template
+    """
+    # Normalize template
+    return np.array([np.abs(np.corrcoef(window, template)[0,1]) for window in windows])
+
+def correct_trigger(raw, event, event_id, tmin, tmax, template='mid', channel=0, hwin=30):
+    """
+    Correct the trigger event using Pearson correlation.
+    Parameters
+    ----------
+    raw : mne.io.Raw
+        The raw data object.
+    event : numpy.ndarray, shaped (n_events, 3).
+        The event to correct.
+    event_id : int
+        The event ID to correct.
+    tmin : float
+        The start time of the epoch relative to the event onset, in seconds.
+    tmax : float
+        The end time of the epoch relative to the event onset, in seconds.
+    template : str, optional
+        The template to use for the correction. Can be 'mid', 'start'. Default is 'mid'.
+    channel : int, optional
+        The channel to use for the correction. Default is 0.
+    hwin : int, optional
+        The half window size for the best trigger searching. Default is 30 (timepoints).
+    Returns
+    -------
+    corrected_events : np.ndarray
+        The corrected events array. Only contains events with the specified event_id.
+    """
+    
+    event = event[event[:, 2] == event_id, 0]
+    new_events = []
+    sfreq = raw.info['sfreq']
+    data = raw.get_data()[channel]
+    tpmin = int(tmin * sfreq)
+    tpmax = int(tmax * sfreq)
+    
+    if template == 'mid':
+        tmplt_event_tp = event[event.shape[0] // 2] - raw.first_samp
+        tmplt = data[tmplt_event_tp + tpmin:tmplt_event_tp + tpmax+1]
+    elif template == 'start':
+        try:
+            tmplt_event_tp = event[0] - raw.first_samp
+            tmplt = data[tmplt_event_tp + tpmin:tmplt_event_tp + tpmax+1]
+        except IndexError:
+            tmplt_event_tp = event[1] - raw.first_samp
+            tmplt = data[tmplt_event_tp + tpmin:tmplt_event_tp + tpmax+1]
+    else:
+        raise ValueError(f"Template {template} not supported. Use 'mid' or 'start'.")
+    best_pos_list = []
+    
+    for ev_tp in event:
+        ev_tp -= raw.first_samp
+        win_pos_list = np.arange(ev_tp-hwin, ev_tp+hwin+1)
+        win_pos_list = win_pos_list[(win_pos_list+tpmin >= 0) & (win_pos_list+tpmax+1 < len(data))]
+        if len(win_pos_list) == 0:
+            continue
+        
+        window_arr = np.stack([data[pos+tpmin:pos+tpmax+1] for pos in win_pos_list])
+        corr = pearson_corr(window_arr, tmplt)
+        best_pos = win_pos_list[np.argmax(corr)]  
+        best_pos_list.append(best_pos-ev_tp)
+        
+        new_events.append([best_pos + raw.first_samp, 0, event_id])      
+    
+    return np.array(new_events, dtype=np.int32)
+    
+    
+
+
+
 def pick_indices(mne_obj, picks, return_indices=True):
     if isinstance(picks, str):
         picks = [picks]
@@ -198,93 +275,71 @@ def filename2subj(filename, ds_name='staresina'):
             subject = match.group(1)
             return subject
 
-def psd_plot(eeg_list, name_list=None, fs=None, picks='eeg', fmin=0, fmax=60, res_mult=32, figsize=(20,3), save_pth=None, debug=False, dB=True):
+def psd_plot(eeg, name=None, fs=None, picks='eeg', fmin=0, fmax=60, resolution=0.05, figsize=(20,3), save_pth=None, debug=False, dB=False):
     """
-    Plot the power spectral density (PSD) of a list of EEG data.
+    Plot the power spectral density (PSD) of a single EEG dataset.
+    
     Parameters
     ----------
-    eeg_list : list
-        List of mne.io.Raw or list of numpy.ndarray-like objects to plot.   if ndarray-like, the shape is (channels, time). 
-    name_list : list, optional
-        List of names for each EEG object. The default is None, i.e. use np.arange(len(eeg_list)).astype(str).
-    fs : int, optional
-        Sampling frequency. The default is None, i.e. use eeg_list[0].info['sfreq'] if it is mne.io.Raw, otherwise, use 5000.
-    picks : str, optional
-        Channels to include in the PSD calculation. The default is 'eeg'.
-    fmin/fmax : float, optional
-        Frequency range for the PSD calculation. The default is 0 and 60.
-    res_mult : int, optional
-        Resolution of psd_plot. The default is 16. n_fft will be set to the closest power of 2 of (res_mult * fs).
-    figsize : tuple, optional
-        Figure size. The default is (20,3).
+    eeg : mne.io.Raw or ndarray-like
+        EEG data. If ndarray-like, shape should be (channels, time).
+    name : str, optional
+        Title or filename suffix. Default: None.
+    fs : float, optional
+        Sampling frequency. If None, taken from Raw, or raised as an error.
+    picks : str or list, optional
+        Channels to include. Default: 'eeg'.
+    fmin, fmax : float
+        Frequency range. Default: 0–60 Hz.
+    resolution : float
+        Resolution for psd map. Default: 0.05 Hz/bin.
+    figsize : tuple
+        Matplotlib figure size. Default: (20, 3).
     save_pth : str, optional
-        Path to save the figure. If None, the figure will be shown. The default is None.
-    Returns
-    -------
-    psd : mne.time_frequency.psd.PSD
-        The PSD object.
+        Base path to save figure. If None, just show.
+    debug : bool
+        If True, print debug info.
+    dB : bool
+        Whether to plot in dB scale.
     """
-    if name_list is None:
-        name_list = np.arange(len(eeg_list)).astype(str)
-    
     verbose = 'INFO' if debug else 'ERROR'
+
+    if 'mne.io' in str(type(eeg)):  # already Raw
+        if fs is None:
+            fs = eeg.info['sfreq']
+        raw = pick_indices(eeg, picks, return_indices=False)
+    else:  # numpy or torch
+        eeg = np.array(eeg).copy()
+        if fs is None:
+            raise ValueError("fs must be provided if eeg is not an mne.io.Raw object.")
+        ch_types = picks if picks in ALL_CHANNEL_LIST else 'eeg'
+        raw = mne.io.RawArray(eeg, mne.create_info(eeg.shape[0], sfreq=fs, ch_types=ch_types))
     
-    all_mne_list = None
-    mne_list = []
-    for eeg_obj in eeg_list:
-        if 'mne.io' in str(type(eeg_obj)):
-            if fs is None:
-                fs = eeg_obj.info['sfreq']
-            assert all_mne_list is not False
-            all_mne_list = True
-            mne_list.append(pick_indices(eeg_obj, picks, return_indices=False))
-        else:
-            if fs is None:
-                fs = 5000
-            assert all_mne_list is not True
-            all_mne_list = False
-            eeg_obj = np.array(eeg_obj).copy()     # convert to numpy array, if input is torch.Tensor
-            ch_types = picks if picks in ALL_CHANNEL_LIST else 'eeg'
-            mne_list.append(mne.io.RawArray(eeg_obj, mne.create_info(eeg_obj.shape[0], sfreq=fs, ch_types=ch_types)))
+    n_fft = int(np.round(fs / resolution))
     
-    n_fft = np.power(2, np.round(np.log2(fs*res_mult))).astype(np.int64)
-    
-    fig, ax = plt.subplots(1,len(mne_list), figsize = figsize)
-    if len(mne_list) == 1:
-        ax = [ax]
     old_level = mne.set_log_level(verbose, return_old_level=True)
-    for idx, (eeg, name) in enumerate(zip(mne_list, name_list)):
-        while True:
-            try:
-                psd = eeg.compute_psd(fmin=fmin, fmax=fmax, n_fft=n_fft, picks=picks)
-                psd.plot(axes=ax[idx], picks=picks, dB=dB)
-                break
-            except ValueError as e:
-                if 'NaN' in str(e):
-                    n_fft = n_fft // 2
-                    print(f'WARNING: PSD calculation failed, trying again with a smaller n_fft {n_fft}')
-                elif 'axes must be an array-like of length' in str(e):
-                    fig_psd = psd.plot(show=False, dB=dB)
-                    if save_pth is None:
-                        save_pth = "./foobar.png"
-                    fig_psd.savefig(f"{save_pth}_{name}_{idx}.png")
-                    plt.close(fig_psd)
-                    break
-                # elif 'consider passing picks explicitly' in str(e):
-                    # psd = eeg.compute_psd(fmin=fmin, fmax=fmax, n_fft=n_fft, picks=picks)
-                    # psd.plot(axes=ax[idx], picks=picks)
-                    # break
-                else:
-                    raise e
-        ax[idx].set_title(name)
-    mne.set_log_level(old_level)
+    while True:
+        try:
+            psd = raw.compute_psd(fmin=fmin, fmax=fmax, n_fft=n_fft, picks=picks)
+            fig = psd.plot(dB=dB, show=False, picks=picks)
+            fig.set_size_inches(figsize)
+            if name is not None:
+                fig.suptitle(str(name))
+            break        
+        except ValueError as e:
+            if 'NaN' in str(e):
+                n_fft = n_fft // 2
+                print(f'WARNING: PSD calculation failed, trying again with a smaller resolution {int(fs / n_fft)} Hz/bin')
+            else:
+                raise e
 
     if save_pth is not None:
-        plt.savefig(save_pth)
-        plt.close()
+        fig.savefig(save_pth.replace('.png', '.pdf'))
+        plt.close(fig)
     else:
         plt.show()
-    
+
+    mne.set_log_level(old_level)
     return psd
         
 
@@ -428,7 +483,10 @@ def mne_epoch2raw(epoch, raw, ndarray=None, tmin=0, overwrite='new', picks='eeg'
     """
     
     epoch = pick_indices(epoch, picks, return_indices=False)
-    picked_idx = [raw.ch_names.index(ch) for ch in epoch.ch_names]    
+    picked_idx = [raw.ch_names.index(ch) for ch in epoch.ch_names]
+    
+    if len(raw.info['bads']) > 0:
+        picked_idx = [idx for idx in picked_idx if raw.ch_names[idx] not in raw.info['bads']]
     
     # get data
     if ndarray is not None:
