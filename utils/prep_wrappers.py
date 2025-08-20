@@ -485,6 +485,28 @@ def crop_TR(dataset, userargs):
     dataset["raw"] = crop_eeg_to_tr(dataset["raw"], tmin=tmin, num_edge_TR=num_edge_TR)
     return dataset 
 
+def crop_by_epoch(dataset, userargs):
+    """
+    Crops the dataset to the epochs of the EEG data.
+    """
+    
+    epoch_name = userargs.get('epoch_name', 'sim_ep')
+    num_edge_epoch = userargs.get('num_edge_epoch', 0)
+    
+    epoch = dataset[epoch_name]
+    events = copy.deepcopy(epoch.events)
+    events = events[np.argsort(events[:, 0])]  # sort events by timepoint
+    
+    start_point = events[0,0] - dataset['raw'].first_samp
+    end_point = events[-1,0] + epoch.tmax*dataset['raw'].info['sfreq'] - dataset['raw'].first_samp
+    
+    edge_time_crop = num_edge_epoch*(epoch.tmax-epoch.tmin)
+    new_tmin = max(start_point/dataset['raw'].info['sfreq']+epoch.tmin, dataset['raw'].tmin) + edge_time_crop
+    tmax = min(end_point/dataset['raw'].info['sfreq'], dataset['raw'].tmax) - edge_time_crop
+    
+    dataset["raw"] = dataset["raw"].crop(tmin=new_tmin, tmax=tmax, include_tmax=False)  
+    return dataset
+
 def set_channel_type_raw(dataset, userargs):
     remove_trigger = userargs.get('remove_trigger', True)
     
