@@ -57,9 +57,16 @@ def voltage_correction(dataset, userargs):
     return dataset
 
 def cleanup(dataset, userargs):
-    keywords = userargs.get('keywords', ['_ep'])
+    keywords = userargs.get('keywords', ['_noise_'])
+    epoch_unload = userargs.get('epoch_unload', True)
+    
     pop_keys = []
     for k in dataset.keys():
+        if epoch_unload and '_ep' in k:
+            if isinstance(dataset[k], mne.Epochs):
+                dataset[k].preload = False
+                dataset[k]._data = None
+            
         for keyword in keywords:
             if keyword in k:
                 pop_keys.append(k)
@@ -68,6 +75,22 @@ def cleanup(dataset, userargs):
         dataset.pop(k)
     return dataset
 
+def mid_crop(dataset, userargs):
+    """Crops the raw data to the middle of the recording."""
+    length = userargs.get('length', 250)  # Length of the crop in seconds    
+
+    tmin = dataset['raw'].times[0]
+    tmax = dataset['raw'].times[-1]
+    
+    if length > (tmax - tmin):
+        raise ValueError(f"Length {length} seconds is longer than the recording duration {tmax - tmin} seconds.")
+    
+    mid = (tmin + tmax) / 2
+    tmin = mid - length / 2
+    tmax = mid + length / 2
+    dataset['raw'].crop(tmin=tmin, tmax=tmax)
+    return dataset
+        
 
 def init_tracer(dataset, userargs):
     """Initializes the EEGTracer with specific metrics for the dataset."""
@@ -156,6 +179,8 @@ def initialize(dataset, userargs):
         dataset['raw'].drop_channels(['F11', 'F12', 'FT11', 'FT12', 'Cb1', 'Cb2'], on_missing='warn')
         print("Warning: F11, F12, FT11, FT12, Cb1, Cb2 are dropped from the raw data, as no gel is used in these channels.")
         
+    elif ds_name == 'lemon':
+        pass
     else:
         raise ValueError(f"Unknown dataset name: {ds_name}. Please provide a valid dataset name.")
 

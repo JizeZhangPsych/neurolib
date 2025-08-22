@@ -89,7 +89,7 @@ def correct_trigger(raw, event, event_id, tmin, tmax, template='mid', channel=0,
 def pick_indices(mne_obj, picks, return_indices=True):
     if isinstance(picks, str):
         picks = [picks]
-    if 'all' in picks:
+    if picks is None or 'all' in picks:
         return np.arange(len(mne_obj.ch_names)) if return_indices else mne_obj.copy()
     
     type_flags = {}
@@ -146,7 +146,7 @@ def find_spurious_channels(psd, freq_range=[1,40], slice_interval=0.07, residual
     return dirty_channels
 
 class Pathfinder:
-    def __init__(self, def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", src="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", prep="after_prep", recon="after_recon", hmm="after_hmm", raw="edfs", slice="abnormal_slices", debug="debug", **kwargs):
+    def __init__(self, ds_name='staresina', def_fsl_dir='/opt/ohba/software/software/fsl/6.0.7.9', base_dir="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", src="/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/", prep="after_prep", recon="after_recon", hmm="after_hmm", raw="edfs", slice="abnormal_slices", debug="debug", **kwargs):
         """
             Generates a class containing for finding paths of EEG-fMRI processing.
             Parameters:
@@ -177,7 +177,7 @@ class Pathfinder:
                 raise ValueError(f"Key {key} already exists in fdr dictionary, don't include it in kwargs. Existing keys are {self.fdr.keys()}")
             self.fdr[key] = os.path.join(self.fdr['base'], value)
         
-        self.subject_list = sorted(list(set([filename2subj(filename) for filename in os.listdir(self.fdr["raw"])])))
+        self.subject_list = sorted(list(set([filename2subj(filename, ds_name) for filename in os.listdir(self.fdr["raw"])])))
     
     def get_fdr_dict(self):
         return self.fdr
@@ -322,9 +322,6 @@ def psd_plot(eeg, name=None, fs=None, picks='eeg', fmin=0, fmax=60, resolution=0
         try:
             psd = raw.compute_psd(fmin=fmin, fmax=fmax, n_fft=n_fft, picks=picks)
             fig = psd.plot(dB=dB, show=False, picks=picks)
-            fig.set_size_inches(figsize)
-            if name is not None:
-                fig.suptitle(str(name))
             break        
         except ValueError as e:
             if 'NaN' in str(e):
@@ -332,12 +329,26 @@ def psd_plot(eeg, name=None, fs=None, picks='eeg', fmin=0, fmax=60, resolution=0
                 print(f'WARNING: PSD calculation failed, trying again with a smaller resolution {int(fs / n_fft)} Hz/bin')
             else:
                 raise e
+        except RuntimeError as e:
+            if 'No plottable channel types found' in str(e):
+                fig = psd.plot(dB=dB, show=False)
+                break
+            else:
+                raise e
 
-    if save_pth is not None:
-        fig.savefig(save_pth.replace('.png', '.pdf'))
-        plt.close(fig)
-    else:
-        plt.show()
+    fig.set_size_inches(figsize)
+    if name is not None:
+        fig.suptitle(str(name))
+    
+    try:
+        if save_pth is not None:
+            fig.savefig(save_pth.replace('.png', '.pdf'))
+            plt.close(fig)
+        else:
+            plt.show()
+    except ValueError as e:
+        print(f"WARNING: {e}. Plotting without saving to file.")
+        print(f"Current psd is : {psd}")
 
     mne.set_log_level(old_level)
     return psd
