@@ -176,8 +176,11 @@ class Pathfinder:
             if key in self.fdr.keys():
                 raise ValueError(f"Key {key} already exists in fdr dictionary, don't include it in kwargs. Existing keys are {self.fdr.keys()}")
             self.fdr[key] = os.path.join(self.fdr['base'], value)
-        
-        self.subject_list = sorted(list(set([filename2subj(filename, ds_name) for filename in os.listdir(self.fdr["raw"])])))
+
+        try:        
+            self.subject_list = sorted(list(set([filename2subj(filename, ds_name) for filename in os.listdir(self.fdr["raw"])])))
+        except :
+            self.subject_list = []
     
     def get_fdr_dict(self):
         return self.fdr

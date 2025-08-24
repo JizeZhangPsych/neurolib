@@ -1511,8 +1511,10 @@ def bcg_ep_ica(dataset, userargs):
     downsample = userargs.get('downsample', 1)    # only set this if the "bcg_ep" is not downsampled!!!
     flatten_epoch_frange = userargs.get('flatten_epoch_frange', [1,40])  # the flattened epochs will be band pass filtered to the specified frequency range, e.g. [1, 40] for 1-40Hz bandpass filtering
     foi = userargs.get('freq_of_interest', [6, 12])  # the frequency range where you're sure not expecting any peaks within. default set to [6,12] Hz
-    peak_threshold = userargs.get('peak_threshold', 3) # threshold for peak detection in psd, default is 3, which means only peaks with at least 3 times the value of the mean of the surrounding frequencies will be considered as peaks.
+    peak_threshold = userargs.get('peak_threshold', None) # threshold for peak detection in psd, default is 3, which means only peaks with at least 3 times the value of the mean of the surrounding frequencies will be considered as peaks. None if peak detection is not desired.
     ctps_threshold = userargs.get('ctps_threshold', 0.15)
+    l_freq = userargs.get('l_freq', 1)
+    h_freq = userargs.get('h_freq', None)
     
     assert 'bcg_ep' in dataset, "Please run qrs_detect first to create bcg_ep."
     
@@ -1520,24 +1522,26 @@ def bcg_ep_ica(dataset, userargs):
     
     ev[:,0] = ev[:,0] / downsample
     ev = ev.astype(np.int64)
-    bcg_ep = mne.Epochs(dataset['raw'], events=ev, tmin=dataset["bcg_ep"].tmin, tmax=dataset["bcg_ep"].tmax, event_id=qrs_event_id, baseline=None, proj=False)
+    bcg_ep = mne.Epochs(copy.deepcopy(dataset['raw']).filter(l_freq, h_freq), events=ev, tmin=dataset["bcg_ep"].tmin, tmax=dataset["bcg_ep"].tmax, event_id=qrs_event_id, baseline=None, proj=False)
     bcg_ep.load_data()  # Ensure the data is loaded before applying ICA
     
     ica = ICA(n_components=n_components, max_iter=max_iter, random_state=seed)
     ica.fit(bcg_ep)
     
-    exclude_list = []
-    data = ica._transform_epochs(bcg_ep, concatenate=True)
-    data = mne.io.RawArray(data, mne.create_info(data.shape[0], sfreq=dataset['raw'].info['sfreq'], ch_types='eeg'))
-    psd = data.compute_psd(fmin=flatten_epoch_frange[0], fmax=flatten_epoch_frange[1], n_fft=int(np.round(dataset['raw'].info['sfreq']*20)))  # 20: resolution of 20 bins within 1Hz, 0.05 later = 1/20, 0.1 = 2/20
-    
-    epoch_freq = 1 / (bcg_ep.tmax-bcg_ep.tmin+1/dataset['raw'].info['sfreq'])
-    
-    ratio = []
-    for idx in range(int(np.floor(foi[0]/epoch_freq)), int(np.ceil(foi[1]/epoch_freq))):
-        ratio.append(psd.get_data(fmin=idx*epoch_freq-0.05, fmax=idx*epoch_freq+0.05).max(axis=1) / psd.get_data(fmin=(idx-1)*epoch_freq+0.1, fmax=(idx+1)*epoch_freq-0.1).mean(axis=1))
-    ratio = np.array(ratio)
-    exclude_list = np.unique(np.where(np.array(ratio)>peak_threshold)[1])
+    if peak_threshold is None:
+        exclude_list = []
+    else:
+        data = ica._transform_epochs(bcg_ep, concatenate=True)
+        data = mne.io.RawArray(data, mne.create_info(data.shape[0], sfreq=dataset['raw'].info['sfreq'], ch_types='eeg'))
+        psd = data.compute_psd(fmin=flatten_epoch_frange[0], fmax=flatten_epoch_frange[1], n_fft=int(np.round(dataset['raw'].info['sfreq']*20)))  # 20: resolution of 20 bins within 1Hz, 0.05 later = 1/20, 0.1 = 2/20
+        
+        epoch_freq = 1 / (bcg_ep.tmax-bcg_ep.tmin+1/dataset['raw'].info['sfreq'])
+        
+        ratio = []
+        for idx in range(int(np.floor(foi[0]/epoch_freq)), int(np.ceil(foi[1]/epoch_freq))):
+            ratio.append(psd.get_data(fmin=idx*epoch_freq-0.05, fmax=idx*epoch_freq+0.05).max(axis=1) / psd.get_data(fmin=(idx-1)*epoch_freq+0.1, fmax=(idx+1)*epoch_freq-0.1).mean(axis=1))
+        ratio = np.array(ratio)
+        exclude_list = np.unique(np.where(np.array(ratio)>peak_threshold)[1])
     
     if ctps_threshold is not None:
         # exclude_list.extend(np.where(ica.find_bads_ecg(bcg_ep)[1]>ctps_threshold)[0])
