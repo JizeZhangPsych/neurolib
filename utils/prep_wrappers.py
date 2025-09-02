@@ -450,6 +450,7 @@ def set_channel_montage(dataset, userargs):
                 ch_dict['r'] *= IRENE_RESCALE
             
             elif ch_dict['kind'] == mne.io.constants.FIFF.FIFFV_POINT_CARDINAL:
+                ch_dict['r'] *= IRENE_RESCALE
                 if ch_dict['ident'] == mne.io.constants.FIFF.FIFFV_POINT_LPA:
                     ch_dict['r'] += LPA_CHANGE
                 elif ch_dict['ident'] == mne.io.constants.FIFF.FIFFV_POINT_RPA:
