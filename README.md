@@ -46,3 +46,4 @@ The files in edfs requires following tuning:
 1. py-ecg-detectors is not required. Copy the code and remove the requirement.
 2. Folder structure just tuned, import error may exist. 
 3. Multiple pathfinder exists. Make it generalizable and retain only one.
+4. utils too chaotic currently. Make some subfolders.
