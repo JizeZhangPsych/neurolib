@@ -18,7 +18,8 @@ class IrenePathfinder(BasePathfinder):
         'irene_bcg': "/ohba/pi/knobre/irene/data_for_jize/curry_clean/visit{visit}/s{subject}/s{foo}_mrEEG{foo1}_block{block}_mr_bcg_clean.cdt",
         'preproc': "/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/after_prep_irene/{subject}{visit}{block}/{subject}{visit}{block}_preproc-raw.fif",
         'preproc_wo_ica': "/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/after_prep_irene/{subject}{visit}{block}/{subject}{visit}{block}_raw_before_ica.pkl",
-        'src': "/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/after_src_irene/{subject}{visit}{block}/parc/lcmv-parc-raw.fif"
+        'src': "/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/after_src_irene/{subject}{visit}{block}/parc/lcmv-parc-raw.fif",
+        'irene_src': "/ohba/pi/mwoolrich/datasets/eeg-fmri_Staresina/after_src_ireneprep/{subject}{visit}{block}/parc/lcmv-parc-raw.fif"
     }
 
     def __init__(self, file_patterns: Optional[Dict[str, str]] = None):

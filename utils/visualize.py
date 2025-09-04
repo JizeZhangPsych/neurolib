@@ -793,20 +793,24 @@ class StaticVisualizer():
 
         # Plot AEC connectivity network
         fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(9, 3))
-        plot_kwargs.update({"edge_cmap": colormap, "figure": fig})
+        plot_kwargs.update({"edge_cmap": colormap, "figure": fig, "colorbar": False})
         connectivity.save(
             connectivity_map=connectivity_map,
             parcellation_file=self.parcellation_file,
             plot_kwargs=plot_kwargs,
         )
-        cb_ax = fig.get_axes()[-1]
-        pos = cb_ax.get_position()
-        new_pos = [pos.x0 * 1.03, pos.y0, pos.width, pos.height]
-        cb_ax.set_position(new_pos)
-        cb_ax.tick_params(labelsize=18)
+        # cb_ax = fig.get_axes()[-1]
+        # pos = cb_ax.get_position()
+        # new_pos = [pos.x0 * 1.03, pos.y0, pos.width, pos.height]
+        # cb_ax.set_position(new_pos)
+        # cb_ax.tick_params(labelsize=18)
+        
+        for a in fig.get_axes():
+            a.set_axis_off()
+
 
         # Save figure
-        fig.savefig(filename, transparent=True)
+        fig.savefig(filename, transparent=True, bbox_inches="tight", pad_inches=0)
         plt.close(fig)
 
         return None
